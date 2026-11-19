@@ -528,8 +528,8 @@ function updateTokenCreationLinks(targetUsername) {
   if (els.modalCreateRepoTokenLink) {
     els.modalCreateRepoTokenLink.href = repoUrl;
     els.modalCreateRepoTokenLink.textContent = cleanUser
-      ? `Follow + Repo Deletion (@${cleanUser}: delete_repo, repo) ↗`
-      : 'Follow + Repo Deletion (user:follow, delete_repo, repo) ↗';
+      ? `Full Housekeeping: Follow + Archive/Delete (@${cleanUser}: repo, delete_repo) ↗`
+      : 'Full Housekeeping: Follow + Archive/Delete Repos (user:follow, repo, delete_repo) ↗';
   }
 }
 
