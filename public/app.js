@@ -1,21 +1,26 @@
 const LOCAL_STORAGE_ALLOWLIST_KEY = 'gh_housekeeping_allowlist_v1';
 const LOCAL_STORAGE_THEME_KEY = 'gh_housekeeping_theme_v2';
+const LOCAL_STORAGE_VIEW_KEY = 'gh_housekeeping_view_v1';
+const SNAPSHOT_KEY_PREFIX = 'gh_housekeeping_snapshot_v1_';
 const SESSION_STORAGE_PAT_KEY = 'gh_housekeeping_pat_v1';
 const GITHUB_USERNAME_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 const UNFOLLOW_DELAY_MS = 300;
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 const state = {
   runtimeMode: 'detecting', // 'local-cli' | 'web-client'
   theme: 'light', // 'light' | 'dark'
+  viewMode: 'grid', // 'grid' | 'compact'
   auth: null,
   data: null,
   allowlist: {},
   activeTab: 'non-followers', // 'non-followers' | 'allowlist' | 'mutuals' | 'fans'
   showAllowlistedInNonFollowers: false,
   searchQuery: '',
-  preset: 'all', // 'all' | 'popular' | 'regular' | 'zero-repos'
+  preset: 'all', // 'all' | 'popular' | 'regular' | 'dormant' | 'zero-repos'
   sortBy: 'order-asc',
   selectedLogins: new Set(),
+  lastClickedLogin: null,
   pendingUnfollowLogins: [],
 };
 
@@ -53,6 +58,8 @@ const els = {
   scanModeChip: document.getElementById('scan-mode-chip'),
   ownershipChip: document.getElementById('ownership-chip'),
   switchToViewerBtn: document.getElementById('switch-to-viewer-btn'),
+  rescanBtn: document.getElementById('rescan-btn'),
+  snapshotDiffBanner: document.getElementById('snapshot-diff-banner'),
   profileBio: document.getElementById('profile-bio'),
   exportCsvBtn: document.getElementById('export-csv-btn'),
   exportAllowlistBtn: document.getElementById('export-allowlist-btn'),
@@ -80,10 +87,13 @@ const els = {
   searchInput: document.getElementById('search-input'),
   presetBtns: document.querySelectorAll('.pill-btn'),
   sortSelect: document.getElementById('sort-select'),
+  viewGridBtn: document.getElementById('view-grid-btn'),
+  viewCompactBtn: document.getElementById('view-compact-btn'),
 
   selectAllCheckbox: document.getElementById('select-all-checkbox'),
   selectionSummary: document.getElementById('selection-summary'),
   clearSelectionBtn: document.getElementById('clear-selection-btn'),
+  autoShieldPopularBtn: document.getElementById('auto-shield-popular-btn'),
   batchAllowlistAddBtn: document.getElementById('batch-allowlist-add-btn'),
   batchAllowlistRemoveBtn: document.getElementById('batch-allowlist-remove-btn'),
   batchUnfollowBtn: document.getElementById('batch-unfollow-btn'),
@@ -187,6 +197,147 @@ function applyTheme(theme) {
     els.themeIcon.textContent = '☀️';
     els.themeLabel.textContent = 'Light';
   }
+}
+
+function initViewMode() {
+  let saved = 'grid';
+  try {
+    saved = localStorage.getItem(LOCAL_STORAGE_VIEW_KEY) || 'grid';
+  } catch {
+    // ignore
+  }
+  applyViewMode(saved === 'compact' ? 'compact' : 'grid');
+}
+
+function applyViewMode(mode) {
+  state.viewMode = mode;
+  try {
+    localStorage.setItem(LOCAL_STORAGE_VIEW_KEY, mode);
+  } catch {
+    // ignore
+  }
+  if (els.cardsGrid) {
+    els.cardsGrid.classList.toggle('compact-view', mode === 'compact');
+  }
+  if (els.viewGridBtn && els.viewCompactBtn) {
+    els.viewGridBtn.classList.toggle('active', mode === 'grid');
+    els.viewCompactBtn.classList.toggle('active', mode === 'compact');
+  }
+}
+
+function isDormantUser(user) {
+  if (!user?.updatedAt) return false;
+  const ts = Date.parse(user.updatedAt);
+  if (Number.isNaN(ts)) return false;
+  return Date.now() - ts > ONE_YEAR_MS;
+}
+
+function formatRelativeActivity(updatedAt) {
+  if (!updatedAt) return null;
+  const ts = Date.parse(updatedAt);
+  if (Number.isNaN(ts)) return null;
+  const diffDays = Math.floor((Date.now() - ts) / (1000 * 60 * 60 * 24));
+  if (diffDays <= 1) return { label: 'Active today', dormant: false };
+  if (diffDays < 30) return { label: `Active ${diffDays}d ago`, dormant: false };
+  const diffMonths = Math.floor(diffDays / 30);
+  if (diffMonths < 12) return { label: `Active ${diffMonths}mo ago`, dormant: false };
+  const diffYears = (diffDays / 365).toFixed(1).replace(/\.0$/, '');
+  return { label: `💤 Dormant (${diffYears}yr)`, dormant: true };
+}
+
+function computeAndRenderSnapshotDiff(payload) {
+  if (!els.snapshotDiffBanner || !payload?.profile?.login) return;
+  const loginKey = payload.profile.login.toLowerCase();
+  const storageKey = `${SNAPSHOT_KEY_PREFIX}${loginKey}`;
+
+  // Current followers = mutuals + fans
+  const currentFollowers = [
+    ...(payload.mutuals || []).map((u) => u.login),
+    ...(payload.fans || []).map((u) => u.login),
+  ];
+  const currentSet = new Set(currentFollowers.map((l) => l.toLowerCase()));
+
+  let prev = null;
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw) prev = JSON.parse(raw);
+  } catch {
+    // ignore
+  }
+
+  // Save current snapshot
+  try {
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        scannedAt: new Date().toISOString(),
+        followers: currentFollowers,
+      })
+    );
+  } catch {
+    // ignore
+  }
+
+  if (!prev || !Array.isArray(prev.followers)) {
+    els.snapshotDiffBanner.classList.add('hidden');
+    return;
+  }
+
+  const prevSet = new Set(prev.followers.map((l) => String(l).toLowerCase()));
+  const lostFollowers = prev.followers.filter((l) => !currentSet.has(String(l).toLowerCase()));
+  const newFollowers = currentFollowers.filter((l) => !prevSet.has(String(l).toLowerCase()));
+
+  if (lostFollowers.length === 0 && newFollowers.length === 0) {
+    els.snapshotDiffBanner.classList.add('hidden');
+    return;
+  }
+
+  const lostChips = lostFollowers
+    .slice(0, 12)
+    .map(
+      (l) =>
+        `<a href="https://github.com/${encodeURIComponent(
+          l
+        )}" target="_blank" rel="noopener noreferrer" class="diff-chip-lost">− @${escapeHtml(
+          l
+        )}</a>`
+    )
+    .join('');
+
+  const gainedChips = newFollowers
+    .slice(0, 12)
+    .map(
+      (l) =>
+        `<a href="https://github.com/${encodeURIComponent(
+          l
+        )}" target="_blank" rel="noopener noreferrer" class="diff-chip-gained">+ @${escapeHtml(
+          l
+        )}</a>`
+    )
+    .join('');
+
+  els.snapshotDiffBanner.innerHTML = `
+    <div>
+      <strong>🔔 Realtime Diff Since Last Scan:</strong>
+      <span>
+        ${
+          lostFollowers.length > 0
+            ? `<strong>${lostFollowers.length}</strong> unfollowed you`
+            : ''
+        }
+        ${lostFollowers.length > 0 && newFollowers.length > 0 ? ' · ' : ''}
+        ${
+          newFollowers.length > 0
+            ? `<strong>${newFollowers.length}</strong> new follower${
+                newFollowers.length === 1 ? '' : 's'
+              }`
+            : ''
+        }
+      </span>
+      <div class="diff-chips">${lostChips}${gainedChips}</div>
+    </div>
+  `;
+  els.snapshotDiffBanner.classList.remove('hidden');
 }
 
 // Build pre-filled GitHub Token creation URL tailored to the account entered
@@ -748,6 +899,18 @@ async function scanAccount(username) {
     state.allowlist = payload.allowlist || {};
     saveLocalAllowlist(state.allowlist);
     state.selectedLogins.clear();
+    state.lastClickedLogin = null;
+
+    // Sync ?user= query param in browser URL without reloading
+    try {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set('user', payload.profile.login);
+      window.history.replaceState({}, '', nextUrl.toString());
+    } catch {
+      // ignore
+    }
+
+    computeAndRenderSnapshotDiff(payload);
 
     els.summarySection.classList.remove('hidden');
     els.controlsSection.classList.remove('hidden');
@@ -910,6 +1073,8 @@ function getFilteredAndSortedUsers() {
     base = base.filter((u) => (u.followersCount ?? 0) >= 1000);
   } else if (state.preset === 'regular') {
     base = base.filter((u) => u.followersCount === null || u.followersCount < 1000);
+  } else if (state.preset === 'dormant') {
+    base = base.filter((u) => isDormantUser(u));
   } else if (state.preset === 'zero-repos') {
     base = base.filter((u) => u.publicReposCount === 0);
   }
@@ -924,6 +1089,11 @@ function getFilteredAndSortedUsers() {
         return (b.followersCount ?? -1) - (a.followersCount ?? -1);
       case 'followers-asc':
         return (a.followersCount ?? 999999999) - (b.followersCount ?? 999999999);
+      case 'activity-asc': {
+        const tsA = a.updatedAt ? Date.parse(a.updatedAt) : 9999999999999;
+        const tsB = b.updatedAt ? Date.parse(b.updatedAt) : 9999999999999;
+        return tsA - tsB;
+      }
       case 'repos-asc':
         return (a.publicReposCount ?? 999999) - (b.publicReposCount ?? 999999);
       case 'login-asc':
@@ -934,6 +1104,13 @@ function getFilteredAndSortedUsers() {
   });
 
   return base;
+}
+
+function getUnshieldedPopularCreators() {
+  if (!state.data?.nonFollowers) return [];
+  return state.data.nonFollowers.filter(
+    (u) => !isAllowlisted(u.login) && (u.followersCount ?? 0) >= 1000
+  );
 }
 
 function updateSelectionToolbar(visibleUsers) {
@@ -957,6 +1134,16 @@ function updateSelectionToolbar(visibleUsers) {
   document.querySelectorAll('.sel-count').forEach((el) => {
     el.textContent = String(selectedCount);
   });
+
+  if (els.autoShieldPopularBtn) {
+    const popularCreators = getUnshieldedPopularCreators();
+    const showAutoShield =
+      state.activeTab === 'non-followers' && popularCreators.length > 0;
+    els.autoShieldPopularBtn.classList.toggle('hidden', !showAutoShield);
+    if (showAutoShield) {
+      els.autoShieldPopularBtn.textContent = `✨ Auto-Shield Creators (${popularCreators.length})`;
+    }
+  }
 
   const isOwner = isViewingOwnVerifiedAccount();
   els.batchAllowlistAddBtn.disabled = selectedCount === 0;
@@ -1016,6 +1203,20 @@ function renderUserCards() {
       } else {
         statusBadge = `<span class="badge badge-mutual">Follows back</span>`;
       }
+
+      const creatorBadge =
+        (u.followersCount ?? 0) >= 1000
+          ? `<span class="badge badge-creator" title="Popular creator / maintainer (1,000+ followers)">⭐ Creator 1k+</span>`
+          : '';
+
+      const actInfo = formatRelativeActivity(u.updatedAt);
+      const activityBadge = actInfo
+        ? `<span class="badge ${
+            actInfo.dormant ? 'badge-dormant' : 'badge-active'
+          }" title="Last GitHub profile/repo update: ${escapeHtml(u.updatedAt)}">${escapeHtml(
+            actInfo.label
+          )}</span>`
+        : '';
 
       const orderBadge =
         u.followOrder && u.followOrder < 99999
@@ -1088,6 +1289,8 @@ function renderUserCards() {
                 <a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="card-handle">@${loginEsc} ↗</a>
                 <div class="card-badges">
                   ${statusBadge}
+                  ${creatorBadge}
+                  ${activityBadge}
                 </div>
               </div>
             </div>
@@ -1100,7 +1303,7 @@ function renderUserCards() {
             }
           </div>
 
-          <div>
+          <div class="card-right-group">
             <div class="card-metrics" style="margin-bottom:10px;">
               <div class="metric-item">
                 <span class="metric-val">${formatCount(u.followersCount)}</span>
@@ -1448,6 +1651,39 @@ els.switchToViewerBtn.addEventListener('click', () => {
   }
 });
 
+if (els.rescanBtn) {
+  els.rescanBtn.addEventListener('click', () => {
+    const target = state.data?.profile?.login || els.usernameInput.value;
+    if (target) scanAccount(target);
+  });
+}
+
+if (els.viewGridBtn && els.viewCompactBtn) {
+  els.viewGridBtn.addEventListener('click', () => applyViewMode('grid'));
+  els.viewCompactBtn.addEventListener('click', () => applyViewMode('compact'));
+}
+
+if (els.autoShieldPopularBtn) {
+  els.autoShieldPopularBtn.addEventListener('click', async () => {
+    const creators = getUnshieldedPopularCreators().map((u) => u.login);
+    if (creators.length > 0) {
+      await addToAllowlist(creators);
+    }
+  });
+}
+
+// Keyboard shortcut: Press '/' anywhere (outside inputs) to focus search box
+window.addEventListener('keydown', (e) => {
+  if (
+    e.key === '/' &&
+    document.activeElement &&
+    !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)
+  ) {
+    e.preventDefault();
+    els.searchInput?.focus();
+  }
+});
+
 const toggleModesExplainer = () => {
   els.modesExplainer.classList.toggle('hidden');
 };
@@ -1541,11 +1777,27 @@ els.cardsGrid.addEventListener('click', (e) => {
   if (!login) return;
 
   if (action === 'toggle-select') {
-    if (actionEl.checked) {
+    const isChecked = actionEl.checked;
+    if (e.shiftKey && state.lastClickedLogin && state.lastClickedLogin !== login) {
+      const visibleLogins = getFilteredAndSortedUsers().map((u) => u.login);
+      const startIdx = visibleLogins.indexOf(state.lastClickedLogin);
+      const endIdx = visibleLogins.indexOf(login);
+      if (startIdx !== -1 && endIdx !== -1) {
+        const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+        for (let i = from; i <= to; i++) {
+          if (isChecked) {
+            state.selectedLogins.add(visibleLogins[i]);
+          } else {
+            state.selectedLogins.delete(visibleLogins[i]);
+          }
+        }
+      }
+    } else if (isChecked) {
       state.selectedLogins.add(login);
     } else {
       state.selectedLogins.delete(login);
     }
+    state.lastClickedLogin = login;
     renderUserCards();
   } else if (action === 'toggle-allowlist') {
     if (isAllowlisted(login)) {
@@ -1699,6 +1951,7 @@ els.importAllowlistInput.addEventListener('change', async (e) => {
 // Initial Bootstrap
 (async function init() {
   initTheme();
+  initViewMode();
   const status = await detectRuntimeAndAuth();
   const urlParams = new URLSearchParams(window.location.search);
   const queryUser = (urlParams.get('user') || urlParams.get('username') || '').trim();
