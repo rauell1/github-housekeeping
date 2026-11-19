@@ -1,10 +1,12 @@
 const LOCAL_STORAGE_ALLOWLIST_KEY = 'gh_housekeeping_allowlist_v1';
+const LOCAL_STORAGE_THEME_KEY = 'gh_housekeeping_theme_v1';
 const SESSION_STORAGE_PAT_KEY = 'gh_housekeeping_pat_v1';
 const GITHUB_USERNAME_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 const UNFOLLOW_DELAY_MS = 300;
 
 const state = {
   runtimeMode: 'detecting', // 'local-cli' | 'web-client'
+  theme: 'dark', // 'dark' | 'light'
   auth: null,
   data: null,
   allowlist: {},
@@ -22,6 +24,9 @@ const els = {
   usernameInput: document.getElementById('username-input'),
   scanBtn: document.getElementById('scan-btn'),
   modeBadgeBtn: document.getElementById('mode-badge-btn'),
+  themeToggleBtn: document.getElementById('theme-toggle-btn'),
+  themeIcon: document.getElementById('theme-icon'),
+  themeLabel: document.getElementById('theme-label'),
   guideBtn: document.getElementById('guide-btn'),
   authBtn: document.getElementById('auth-btn'),
   authDot: document.getElementById('auth-dot'),
@@ -37,6 +42,7 @@ const els = {
   scopeBanner: document.getElementById('scope-banner'),
   scopeBadgeLabel: document.getElementById('scope-badge-label'),
   scopeBannerText: document.getElementById('scope-banner-text'),
+  bannerCreateTokenLink: document.getElementById('banner-create-token-link'),
   copyGhCmdBtn: document.getElementById('copy-gh-cmd-btn'),
   openAuthModalBtn: document.getElementById('open-auth-modal-btn'),
 
@@ -45,6 +51,8 @@ const els = {
   profileName: document.getElementById('profile-name'),
   profileLink: document.getElementById('profile-link'),
   scanModeChip: document.getElementById('scan-mode-chip'),
+  ownershipChip: document.getElementById('ownership-chip'),
+  switchToViewerBtn: document.getElementById('switch-to-viewer-btn'),
   profileBio: document.getElementById('profile-bio'),
   exportCsvBtn: document.getElementById('export-csv-btn'),
   exportAllowlistBtn: document.getElementById('export-allowlist-btn'),
@@ -111,6 +119,7 @@ const els = {
   modalAuthUser: document.getElementById('modal-auth-user'),
   modalAuthScopes: document.getElementById('modal-auth-scopes'),
   modalFollowPerm: document.getElementById('modal-follow-perm'),
+  modalCreateTokenLink: document.getElementById('modal-create-token-link'),
   modalGhCliSection: document.getElementById('modal-gh-cli-section'),
   modalPatHeading: document.getElementById('modal-pat-heading'),
   modalPatDesc: document.getElementById('modal-pat-desc'),
@@ -150,6 +159,77 @@ function showToast(message, type = 'success') {
   }, 3600);
 }
 
+// Theme Management (Dark + Light/White Mode)
+function initTheme() {
+  let saved = 'dark';
+  try {
+    saved = localStorage.getItem(LOCAL_STORAGE_THEME_KEY) || 'dark';
+  } catch {
+    // ignore
+  }
+  applyTheme(saved === 'light' ? 'light' : 'dark');
+}
+
+function applyTheme(theme) {
+  state.theme = theme;
+  document.documentElement.setAttribute('data-theme', theme);
+  try {
+    localStorage.setItem(LOCAL_STORAGE_THEME_KEY, theme);
+  } catch {
+    // ignore
+  }
+  if (theme === 'light') {
+    els.themeIcon.textContent = '🌙';
+    els.themeLabel.textContent = 'Dark';
+  } else {
+    els.themeIcon.textContent = '☀️';
+    els.themeLabel.textContent = 'Light';
+  }
+}
+
+// Build pre-filled GitHub Token creation URL tailored to the account entered
+function updateTokenCreationLinks(targetUsername) {
+  const cleanUser = (
+    targetUsername ||
+    state.data?.profile?.login ||
+    els.usernameInput.value ||
+    ''
+  )
+    .trim()
+    .replace(/^@/, '');
+
+  const description = cleanUser
+    ? `GitHub Follow Housekeeping (@${cleanUser})`
+    : 'GitHub Follow Housekeeping';
+
+  const url = `https://github.com/settings/tokens/new?description=${encodeURIComponent(
+    description
+  )}&scopes=user:follow`;
+
+  if (els.bannerCreateTokenLink) {
+    els.bannerCreateTokenLink.href = url;
+    els.bannerCreateTokenLink.textContent = cleanUser
+      ? `1. Generate Token for @${cleanUser} ↗`
+      : '1. Generate Token on GitHub ↗';
+  }
+  if (els.modalCreateTokenLink) {
+    els.modalCreateTokenLink.href = url;
+    els.modalCreateTokenLink.textContent = cleanUser
+      ? `Open GitHub Token Generator for @${cleanUser} (Pre-filled) ↗`
+      : 'Open GitHub Token Generator (Pre-filled) ↗';
+  }
+}
+
+// Returns true ONLY when authenticated AND the scanned account belongs to the authenticated user
+function isViewingOwnVerifiedAccount() {
+  if (!state.auth?.authenticated || !state.auth?.viewerLogin || !state.data?.profile?.login) {
+    return false;
+  }
+  return (
+    state.auth.viewerLogin.toLowerCase() === state.data.profile.login.toLowerCase()
+  );
+}
+
 function isAllowlisted(login) {
   return Boolean(state.allowlist[String(login).toLowerCase()]);
 }
@@ -168,7 +248,7 @@ function saveLocalAllowlist(allowlist) {
   try {
     localStorage.setItem(LOCAL_STORAGE_ALLOWLIST_KEY, JSON.stringify(allowlist));
   } catch {
-    // ignore quota errors
+    // ignore
   }
 }
 
@@ -188,7 +268,7 @@ function setBrowserPat(token) {
       sessionStorage.removeItem(SESSION_STORAGE_PAT_KEY);
     }
   } catch {
-    // ignore storage errors
+    // ignore
   }
 }
 
@@ -203,7 +283,6 @@ function buildGitHubHeaders(token) {
   return headers;
 }
 
-// Direct Browser Auth Check (used in Cloudflare Web Mode)
 async function checkWebClientAuthStatus() {
   const token = getBrowserPat();
   if (!token) {
@@ -260,7 +339,6 @@ async function checkWebClientAuthStatus() {
   };
 }
 
-// Detect whether we are running on the Local CLI server or Cloudflare Pages static web host
 async function detectRuntimeAndAuth() {
   try {
     const res = await fetch('/api/status', { cache: 'no-store' });
@@ -287,8 +365,8 @@ async function detectRuntimeAndAuth() {
 function renderModeAndAuthUI() {
   const isCli = state.runtimeMode === 'local-cli';
   const s = state.auth;
+  updateTokenCreationLinks();
 
-  // Mode Badge & Mode Comparison Cards
   if (isCli) {
     els.modeBadgeBtn.textContent = '💻 Local CLI Mode';
     els.modeBadgeBtn.className = 'mode-badge mode-cli';
@@ -299,9 +377,6 @@ function renderModeAndAuthUI() {
     els.statAllowlistStorage.textContent = 'Saved to disk (allowlist.json)';
     els.modalRuntimeMode.textContent = '💻 Local CLI Server (127.0.0.1)';
     els.modalGhCliSection.classList.remove('hidden');
-    els.modalPatHeading.textContent = 'Option B: Personal Access Token (Local Server Memory)';
-    els.modalPatDesc.innerHTML =
-      'Paste a GitHub token with the <code>user:follow</code> scope. Stored in your local server memory only.';
     els.clearPatBtn.textContent = 'Use Default (gh CLI)';
   } else {
     els.modeBadgeBtn.textContent = '🌐 Web App Mode';
@@ -313,27 +388,38 @@ function renderModeAndAuthUI() {
     els.statAllowlistStorage.textContent = 'Saved in browser localStorage';
     els.modalRuntimeMode.textContent = '🌐 Web App Mode (Cloudflare Browser-Direct)';
     els.modalGhCliSection.classList.add('hidden');
-    els.modalPatHeading.textContent = 'Browser-Only Personal Access Token (PAT)';
-    els.modalPatDesc.innerHTML =
-      'Paste a GitHub token with the <code>user:follow</code> scope for fast GraphQL metrics and 1-click unfollowing. Stored strictly in your browser <code>sessionStorage</code> and sent only to <code>api.github.com</code>.';
     els.clearPatBtn.textContent = 'Clear Browser Token';
   }
 
-  // Auth Status Pill & Scope Banner
+  // Check if user is signed in AND whether they are viewing another user's profile
+  const scannedLogin = state.data?.profile?.login;
+  const viewingDifferentAccount =
+    s?.authenticated &&
+    s?.viewerLogin &&
+    scannedLogin &&
+    s.viewerLogin.toLowerCase() !== scannedLogin.toLowerCase();
+
   if (!s || !s.authenticated) {
     els.authDot.className = 'status-dot';
-    els.authLabel.textContent = 'Public Mode (No Token)';
+    els.authLabel.textContent = 'Sign In / Get Token';
     els.scopeBanner.classList.remove('hidden');
-    els.scopeBadgeLabel.textContent = 'Public Lookup Mode';
-    if (isCli) {
-      els.scopeBannerText.innerHTML =
-        'You can scan any public <code>@username</code>. Sign in with <code>gh auth login</code> or add a token in <strong>Auth Settings</strong> for enriched GraphQL cards and batch unfollowing.';
-      els.copyGhCmdBtn.classList.remove('hidden');
-    } else {
-      els.scopeBannerText.innerHTML =
-        'Scanning public GitHub profiles directly from your browser. Add a token in <strong>Auth Settings</strong> to unlock rich GraphQL profile metrics and 1-click unfollowing.';
-      els.copyGhCmdBtn.classList.add('hidden');
-    }
+    els.scopeBadgeLabel.textContent = 'Public Read-Only View';
+    els.bannerCreateTokenLink.classList.remove('hidden');
+    els.copyGhCmdBtn.classList.toggle('hidden', !isCli);
+    els.scopeBannerText.innerHTML =
+      'Anyone can view public GitHub following lists, but <strong>unfollowing is locked</strong> until you verify account ownership with a token.';
+  } else if (viewingDifferentAccount) {
+    els.authDot.className = 'status-dot readonly';
+    els.authLabel.textContent = `Signed in as @${s.viewerLogin}`;
+    els.scopeBanner.classList.remove('hidden');
+    els.scopeBadgeLabel.textContent = `Viewing @${escapeHtml(scannedLogin)} (Read-Only)`;
+    els.bannerCreateTokenLink.classList.add('hidden');
+    els.copyGhCmdBtn.classList.add('hidden');
+    els.scopeBannerText.innerHTML = `You are signed in as <strong>@${escapeHtml(
+      s.viewerLogin
+    )}</strong>, so unfollowing is disabled while browsing <strong>@${escapeHtml(
+      scannedLogin
+    )}</strong>'s public profile.`;
   } else if (s.hasFollowScope) {
     els.authDot.className = 'status-dot online';
     const src =
@@ -342,7 +428,7 @@ function renderModeAndAuthUI() {
         : s.source === 'browser-pat'
         ? 'Browser PAT'
         : 'PAT';
-    els.authLabel.textContent = `@${s.viewerLogin} (${src} · Full Access)`;
+    els.authLabel.textContent = `@${s.viewerLogin} (${src} · Verified Owner)`;
     els.scopeBanner.classList.add('hidden');
   } else {
     els.authDot.className = 'status-dot readonly';
@@ -354,16 +440,11 @@ function renderModeAndAuthUI() {
         : 'PAT';
     els.authLabel.textContent = `@${s.viewerLogin} (${src} · Read-Only)`;
     els.scopeBanner.classList.remove('hidden');
-    els.scopeBadgeLabel.textContent = 'Read-Only Token Scope';
-    if (isCli) {
-      els.scopeBannerText.innerHTML =
-        'Your <code>gh</code> CLI token can scan followers/following, but lacks the <code>user:follow</code> scope for unfollowing. Run <code>gh auth refresh -h github.com -s user:follow</code> or add a token in <strong>Auth Settings</strong>.';
-      els.copyGhCmdBtn.classList.remove('hidden');
-    } else {
-      els.scopeBannerText.innerHTML =
-        'Your token can scan followers/following, but lacks the <code>user:follow</code> scope required to unfollow users.';
-      els.copyGhCmdBtn.classList.add('hidden');
-    }
+    els.scopeBadgeLabel.textContent = 'Missing user:follow Permission';
+    els.bannerCreateTokenLink.classList.remove('hidden');
+    els.copyGhCmdBtn.classList.toggle('hidden', !isCli);
+    els.scopeBannerText.innerHTML =
+      'Your token is verified, but lacks the <code>user:follow</code> permission needed to unfollow users. Click <strong>1. Generate Token</strong> to create one with <code>user:follow</code> pre-selected.';
   }
 
   // Modal details
@@ -381,13 +462,13 @@ function renderModeAndAuthUI() {
       ? s.scopes.join(', ')
       : 'none';
     els.modalFollowPerm.textContent = s.hasFollowScope
-      ? '✅ Enabled (Can unfollow directly)'
+      ? '✅ Enabled (Verified owner can unfollow)'
       : '⚠️ Missing user:follow scope (Read-only)';
   } else {
-    els.modalAuthSource.textContent = 'None (Public GitHub REST API)';
+    els.modalAuthSource.textContent = 'None (Public Read-Only API)';
     els.modalAuthUser.textContent = 'Not signed in';
     els.modalAuthScopes.textContent = 'none';
-    els.modalFollowPerm.textContent = '❌ Token with user:follow required to unfollow';
+    els.modalFollowPerm.textContent = '❌ Sign in with token to verify ownership & unfollow';
   }
 }
 
@@ -615,6 +696,7 @@ async function scanAccount(username) {
   }
 
   els.usernameInput.value = cleanUser;
+  updateTokenCreationLinks(cleanUser);
   els.welcomeState.classList.add('hidden');
   els.scanBtn.disabled = true;
   els.scanBtn.textContent = 'Scanning...';
@@ -645,6 +727,7 @@ async function scanAccount(username) {
     els.controlsSection.classList.remove('hidden');
     els.loadingState.classList.add('hidden');
 
+    renderModeAndAuthUI();
     renderProfileAndStats();
     renderUserCards();
   } catch (err) {
@@ -705,6 +788,22 @@ function renderProfileAndStats() {
   els.scanModeChip.textContent = enriched
     ? '⚡ Enriched GraphQL Scan'
     : 'Public REST Scan';
+
+  const isOwner = isViewingOwnVerifiedAccount();
+  if (isOwner) {
+    els.ownershipChip.textContent = '✅ Verified Account Owner';
+    els.ownershipChip.className = 'scan-chip chip-verified';
+    els.switchToViewerBtn.classList.add('hidden');
+  } else if (state.auth?.authenticated && state.auth?.viewerLogin) {
+    els.ownershipChip.textContent = `👁 Read-Only (Not @${state.auth.viewerLogin})`;
+    els.ownershipChip.className = 'scan-chip chip-foreign';
+    els.switchToViewerBtn.textContent = `Switch to My Account (@${state.auth.viewerLogin})`;
+    els.switchToViewerBtn.classList.remove('hidden');
+  } else {
+    els.ownershipChip.textContent = '👁 Public Read-Only View';
+    els.ownershipChip.className = 'scan-chip chip-foreign';
+    els.switchToViewerBtn.classList.add('hidden');
+  }
 
   const totalNonFollowers = nonFollowers.length;
   const allowlistedNonFollowersCount = nonFollowers.filter((u) => isAllowlisted(u.login)).length;
@@ -826,9 +925,14 @@ function updateSelectionToolbar(visibleUsers) {
     el.textContent = String(selectedCount);
   });
 
+  const isOwner = isViewingOwnVerifiedAccount();
   els.batchAllowlistAddBtn.disabled = selectedCount === 0;
   els.batchAllowlistRemoveBtn.disabled = selectedCount === 0;
-  els.batchUnfollowBtn.disabled = selectedCount === 0 || state.activeTab === 'fans';
+  els.batchUnfollowBtn.disabled =
+    selectedCount === 0 || state.activeTab === 'fans' || !isOwner;
+  els.batchUnfollowBtn.title = !isOwner
+    ? 'Sign in with a token matching this GitHub account to enable batch unfollowing'
+    : '';
 }
 
 function renderUserCards() {
@@ -855,6 +959,9 @@ function renderUserCards() {
   }
 
   els.emptyState.classList.add('hidden');
+  const isOwner = isViewingOwnVerifiedAccount();
+  const signedInAsDifferentUser =
+    state.auth?.authenticated && state.auth?.viewerLogin && !isOwner;
 
   const html = visibleUsers
     .map((u) => {
@@ -872,9 +979,9 @@ function renderUserCards() {
       if (allowlisted) {
         statusBadge = `<span class="badge badge-allowlisted">🛡 Allowlisted</span>`;
       } else if (!u.followsBack) {
-        statusBadge = `<span class="badge badge-nonfollower">Not following you</span>`;
+        statusBadge = `<span class="badge badge-nonfollower">Not following back</span>`;
       } else {
-        statusBadge = `<span class="badge badge-mutual">Follows you</span>`;
+        statusBadge = `<span class="badge badge-mutual">Follows back</span>`;
       }
 
       const orderBadge =
@@ -886,7 +993,44 @@ function renderUserCards() {
       if (companyEsc) metaParts.push(`<span>🏢 ${companyEsc}</span>`);
       if (locationEsc) metaParts.push(`<span>📍 ${locationEsc}</span>`);
 
-      const canUnfollow = state.activeTab !== 'fans';
+      let actionButtonHtml = '';
+      if (state.activeTab === 'fans') {
+        actionButtonHtml = `<a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary">View Profile ↗</a>`;
+      } else if (isOwner) {
+        actionButtonHtml = `
+          <button
+            type="button"
+            class="btn btn-sm btn-danger"
+            data-action="unfollow-single"
+            data-login="${loginEsc}"
+          >
+            Unfollow
+          </button>`;
+      } else if (signedInAsDifferentUser) {
+        actionButtonHtml = `
+          <button
+            type="button"
+            class="btn btn-sm btn-secondary"
+            disabled
+            title="You are signed in as @${escapeHtml(
+              state.auth.viewerLogin
+            )}. You cannot unfollow on behalf of @${escapeHtml(state.data.profile.login)}."
+          >
+            🔒 Not Your Account
+          </button>`;
+      } else {
+        actionButtonHtml = `
+          <button
+            type="button"
+            class="btn btn-sm btn-secondary"
+            data-action="prompt-signin"
+            title="Verify ownership of @${escapeHtml(
+              state.data.profile.login
+            )} with a token to enable unfollowing"
+          >
+            🔑 Sign in to Unfollow
+          </button>`;
+      }
 
       return `
         <article class="user-card ${isSel ? 'selected' : ''} ${allowlisted ? 'allowlisted' : ''}" data-login="${loginEsc}">
@@ -949,18 +1093,7 @@ function renderUserCards() {
               >
                 ${allowlisted ? '🛡 Kept (Remove)' : '🛡 Keep (Allowlist)'}
               </button>
-              ${
-                canUnfollow
-                  ? `<button
-                      type="button"
-                      class="btn btn-sm btn-danger"
-                      data-action="unfollow-single"
-                      data-login="${loginEsc}"
-                    >
-                      Unfollow
-                    </button>`
-                  : `<a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary">View Profile ↗</a>`
-              }
+              ${actionButtonHtml}
             </div>
           </div>
         </article>
@@ -971,7 +1104,6 @@ function renderUserCards() {
   els.cardsGrid.innerHTML = html;
 }
 
-// Allowlist mutations (works in both Local CLI Mode and Cloudflare Web Mode)
 async function addToAllowlist(usernames) {
   if (!usernames || usernames.length === 0) return;
 
@@ -1035,6 +1167,12 @@ async function removeFromAllowlist(usernames) {
 }
 
 function openUnfollowModal(usernames) {
+  if (!isViewingOwnVerifiedAccount()) {
+    updateTokenCreationLinks();
+    els.authModal.classList.remove('hidden');
+    return;
+  }
+
   const actionable = usernames.filter((u) => !isAllowlisted(u));
   const skippedCount = usernames.length - actionable.length;
 
@@ -1052,10 +1190,10 @@ function openUnfollowModal(usernames) {
   })`;
   els.unfollowModalDesc.textContent =
     skippedCount > 0
-      ? `You are about to unfollow ${actionable.length} user(s). (${skippedCount} allowlisted user(s) were automatically excluded.)`
+      ? `You are about to unfollow ${actionable.length} user(s) from @${state.auth.viewerLogin}. (${skippedCount} allowlisted user(s) were automatically excluded.)`
       : `You are about to unfollow ${actionable.length} GitHub user${
           actionable.length === 1 ? '' : 's'
-        }. Requests are paced serially (300ms apart) to respect GitHub rate limits.`;
+        } from @${state.auth.viewerLogin}. Requests are paced serially (300ms apart) to respect GitHub rate limits.`;
 
   els.unfollowPreviewList.innerHTML = actionable
     .map((login) => `<span class="preview-chip">@${escapeHtml(login)}</span>`)
@@ -1082,14 +1220,15 @@ function showMissingScopeErrorInModal() {
   els.unfollowModalError.innerHTML = isCli
     ? `<strong>Missing <code>user:follow</code> permission scope.</strong><br/>
        Run <code>gh auth refresh -h github.com -s user:follow</code> in your terminal or click
-       <button type="button" id="inline-open-auth-btn" class="btn-link">Auth Settings</button> to provide a token with <code>user:follow</code> scope.`
+       <button type="button" id="inline-open-auth-btn" class="btn-link">Auth Settings</button> to generate a token in 1 click.`
     : `<strong>Authentication with <code>user:follow</code> scope required.</strong><br/>
-       Click <button type="button" id="inline-open-auth-btn" class="btn-link">Auth Settings</button> to add a GitHub Personal Access Token with the <code>user:follow</code> scope.`;
+       Click <button type="button" id="inline-open-auth-btn" class="btn-link">Easy Token Creator</button> to generate a token with <code>user:follow</code> pre-selected.`;
 
   const inlineBtn = document.getElementById('inline-open-auth-btn');
   if (inlineBtn) {
     inlineBtn.addEventListener('click', () => {
       closeUnfollowModal();
+      updateTokenCreationLinks();
       els.authModal.classList.remove('hidden');
     });
   }
@@ -1141,7 +1280,6 @@ async function executePendingUnfollow() {
       els.unfollowProgressText.textContent = `Unfollowed ${unfollowedSet.size} of ${logins.length}...`;
     }
   } else {
-    // Web Client Mode: direct browser-to-GitHub REST DELETE with serial 300ms delay
     const token = getBrowserPat();
     if (!token) {
       showMissingScopeErrorInModal();
@@ -1258,9 +1396,23 @@ function exportCurrentViewCsv() {
 }
 
 // Event Listeners
+els.usernameInput.addEventListener('input', (e) => {
+  updateTokenCreationLinks(e.target.value);
+});
+
 els.scanForm.addEventListener('submit', (e) => {
   e.preventDefault();
   scanAccount(els.usernameInput.value);
+});
+
+els.themeToggleBtn.addEventListener('click', () => {
+  applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+});
+
+els.switchToViewerBtn.addEventListener('click', () => {
+  if (state.auth?.viewerLogin) {
+    scanAccount(state.auth.viewerLogin);
+  }
 });
 
 const toggleModesExplainer = () => {
@@ -1346,6 +1498,13 @@ els.cardsGrid.addEventListener('click', (e) => {
   if (!actionEl) return;
   const action = actionEl.dataset.action;
   const login = actionEl.dataset.login;
+
+  if (action === 'prompt-signin') {
+    updateTokenCreationLinks();
+    els.authModal.classList.remove('hidden');
+    return;
+  }
+
   if (!login) return;
 
   if (action === 'toggle-select') {
@@ -1374,10 +1533,12 @@ els.confirmUnfollowBtn.addEventListener('click', executePendingUnfollow);
 // Auth Modal events
 els.authBtn.addEventListener('click', async () => {
   await detectRuntimeAndAuth();
+  updateTokenCreationLinks();
   els.authModal.classList.remove('hidden');
 });
 els.openAuthModalBtn.addEventListener('click', async () => {
   await detectRuntimeAndAuth();
+  updateTokenCreationLinks();
   els.authModal.classList.remove('hidden');
 });
 els.closeAuthModal.addEventListener('click', () => {
@@ -1410,11 +1571,12 @@ els.savePatBtn.addEventListener('click', async () => {
   els.authModal.classList.add('hidden');
 
   if (state.auth.authenticated) {
-    showToast(`Authenticated as @${state.auth.viewerLogin}`);
-    if (!els.usernameInput.value.trim()) {
-      await scanAccount(state.auth.viewerLogin);
-    }
+    showToast(`Verified as @${state.auth.viewerLogin}`);
+    // Automatically scan the authenticated user's own account!
+    await scanAccount(state.auth.viewerLogin);
   } else {
+    renderProfileAndStats();
+    renderUserCards();
     showToast('Token cleared or invalid', 'error');
   }
 });
@@ -1434,6 +1596,8 @@ els.clearPatBtn.addEventListener('click', async () => {
     showToast('Cleared browser token');
   }
   renderModeAndAuthUI();
+  renderProfileAndStats();
+  renderUserCards();
   els.customPatInput.value = '';
 });
 
@@ -1494,6 +1658,7 @@ els.importAllowlistInput.addEventListener('change', async (e) => {
 
 // Initial Bootstrap
 (async function init() {
+  initTheme();
   const status = await detectRuntimeAndAuth();
   const urlParams = new URLSearchParams(window.location.search);
   const queryUser = (urlParams.get('user') || urlParams.get('username') || '').trim();
@@ -1501,8 +1666,10 @@ els.importAllowlistInput.addEventListener('change', async (e) => {
 
   if (initialUser) {
     els.usernameInput.value = initialUser;
+    updateTokenCreationLinks(initialUser);
     await scanAccount(initialUser);
   } else {
+    updateTokenCreationLinks('');
     els.modesExplainer.classList.remove('hidden');
     els.welcomeState.classList.remove('hidden');
   }

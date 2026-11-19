@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -44,6 +44,11 @@
           </button>
         </form>
 
+        <button type="button" id="theme-toggle-btn" class="btn btn-secondary btn-sm theme-btn" title="Switch between Dark and Light mode">
+          <span id="theme-icon" aria-hidden="true">☀️</span>
+          <span id="theme-label">Light</span>
+        </button>
+
         <button type="button" id="guide-btn" class="btn btn-secondary btn-sm">
           Modes &amp; Guide
         </button>
@@ -55,7 +60,7 @@
       </div>
     </header>
 
-    <!-- Mode Comparison Strip (collapsible / shown on demand or when unauthenticated) -->
+    <!-- Mode Comparison Strip -->
     <section id="modes-explainer" class="modes-explainer hidden">
       <div class="modes-header">
         <div>
@@ -73,8 +78,8 @@
           </div>
           <p class="mode-desc">Zero installation. Runs 100% inside your browser and talks directly to <code>api.github.com</code>.</p>
           <ul class="mode-list">
-            <li><strong>Public Audit (No Token):</strong> Type any <code>@username</code> above to check non-followers, mutuals, and fans.</li>
-            <li><strong>Full Housekeeping (Browser Token):</strong> Click <strong>Auth Settings</strong> to paste a token with <code>user:follow</code> scope. Kept in your browser session only—never sent to any backend server.</li>
+            <li><strong>Public Audit (No Token):</strong> Type any <code>@username</code> above to view public non-followers, mutuals, and fans.</li>
+            <li><strong>Full Housekeeping (1-Click Token Generator):</strong> Click <strong>Get Token &amp; Sign In</strong> to open GitHub with the <code>user:follow</code> permission pre-selected, then paste the token to unlock unfollowing for your own account.</li>
             <li><strong>Allowlist Storage:</strong> Saved in your browser's <code>localStorage</code> (with JSON export/import).</li>
           </ul>
         </div>
@@ -86,7 +91,7 @@
           </div>
           <p class="mode-desc">Best for developers who already have the official GitHub CLI (<code>gh</code>) installed locally.</p>
           <ul class="mode-list">
-            <li><strong>Run Locally:</strong> <code>npx github-housekeeping --open</code></li>
+            <li><strong>Run Locally:</strong> <code>npx github:rauell1/github-housekeeping --open</code></li>
             <li><strong>Zero PAT Setup:</strong> Automatically reuses your local <code>gh auth</code> login. Run <code>gh auth refresh -h github.com -s user:follow</code> to enable 1-click unfollow.</li>
             <li><strong>Allowlist Storage:</strong> Persisted directly to disk (<code>~/.github-housekeeping/allowlist.json</code>).</li>
           </ul>
@@ -94,24 +99,33 @@
       </div>
 
       <div class="compliance-note">
-        <strong>🛡 GitHub Rules &amp; Rate-Limit Compliance:</strong> This tool only performs manual, user-confirmed housekeeping using official GitHub REST &amp; GraphQL APIs. It never auto-follows or performs follow-churn automation, and serializes unfollow requests with a 300ms delay to respect GitHub's secondary rate limits.
+        <strong>🛡 Ownership &amp; GitHub Rules Compliance:</strong> Anyone's followers/following lists are public on GitHub, so public scanning is read-only. However, <strong>unfollowing is strictly locked to the verified token owner's account</strong>—you can never modify another user's account. Unfollow requests are paced serially (300ms apart) to respect GitHub rate limits.
       </div>
     </section>
 
-    <!-- Scope Warning Banner -->
+    <!-- Scope / Ownership Notice Banner -->
     <div id="scope-banner" class="scope-banner hidden">
       <div class="scope-banner-content">
         <span id="scope-badge-label" class="scope-badge">Read-Only Mode</span>
         <span id="scope-banner-text">
-          You can scan any account and curate your allowlist. To enable 1-click unfollowing, grant the <code>user:follow</code> scope.
+          You can scan any account and curate your allowlist. To enable 1-click unfollowing for your account, connect a token with the <code>user:follow</code> permission.
         </span>
       </div>
       <div class="scope-banner-actions">
-        <button type="button" id="copy-gh-cmd-btn" class="btn btn-sm btn-secondary">
+        <a
+          id="banner-create-token-link"
+          href="https://github.com/settings/tokens/new?description=GitHub+Follow+Housekeeping&scopes=user:follow"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="btn btn-sm btn-primary"
+        >
+          1. Generate Token on GitHub ↗
+        </a>
+        <button type="button" id="copy-gh-cmd-btn" class="btn btn-sm btn-secondary hidden">
           Copy gh CLI Command
         </button>
         <button type="button" id="open-auth-modal-btn" class="btn btn-sm btn-secondary">
-          Auth Settings
+          2. Paste Token / Auth Settings
         </button>
       </div>
     </div>
@@ -126,11 +140,15 @@
               <h2 id="profile-name">—</h2>
               <a id="profile-link" href="#" target="_blank" rel="noopener noreferrer" class="profile-handle">@— ↗</a>
               <span id="scan-mode-chip" class="scan-chip"></span>
+              <span id="ownership-chip" class="scan-chip"></span>
             </div>
             <p id="profile-bio" class="profile-bio"></p>
           </div>
         </div>
         <div class="profile-tools">
+          <button type="button" id="switch-to-viewer-btn" class="btn btn-primary btn-sm hidden">
+            Switch to My Account
+          </button>
           <button type="button" id="export-csv-btn" class="btn btn-secondary btn-sm">
             Export View (CSV)
           </button>
@@ -262,8 +280,8 @@
     <!-- Loading / Welcome / Error / Empty States & Cards Grid -->
     <main class="main-content">
       <div id="welcome-state" class="state-box hidden">
-        <h3>Enter a GitHub username to begin</h3>
-        <p>Type any GitHub handle in the <code>@username</code> box above and click <strong>Scan Account</strong>, or sign in via <strong>Auth Settings</strong>.</p>
+        <h3>Enter your GitHub username to begin</h3>
+        <p>Type your GitHub handle in the <code>@username</code> box above and click <strong>Scan Account</strong>, or click <strong>Auth Settings</strong> to generate a token in 1 click.</p>
       </div>
 
       <div id="loading-state" class="state-box hidden">
@@ -318,43 +336,73 @@
   <div id="auth-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal">
       <div class="modal-header">
-        <h3>GitHub Authentication &amp; Mode Settings</h3>
+        <h3>GitHub Authentication &amp; Easy Token Creator</h3>
         <button type="button" id="close-auth-modal" class="icon-close" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
         <div class="auth-status-card">
           <div><strong>Runtime Mode:</strong> <span id="modal-runtime-mode">—</span></div>
           <div><strong>Auth Source:</strong> <span id="modal-auth-source">—</span></div>
-          <div><strong>Authenticated User:</strong> <span id="modal-auth-user">—</span></div>
+          <div><strong>Verified Account Owner:</strong> <span id="modal-auth-user">—</span></div>
           <div><strong>Detected Scopes:</strong> <code id="modal-auth-scopes">—</code></div>
           <div><strong>Unfollow Permission (<code>user:follow</code>):</strong> <span id="modal-follow-perm">—</span></div>
         </div>
 
-        <div id="modal-gh-cli-section" class="auth-instructions">
-          <h4>Option A (Local CLI Mode): Use GitHub CLI (<code>gh</code>)</h4>
-          <p>When running locally via <code>npx github-housekeeping</code>, grant <code>user:follow</code> to your local <code>gh</code> session:</p>
-          <div class="code-copy-row">
-            <code>gh auth refresh -h github.com -s user:follow</code>
-            <button type="button" id="modal-copy-gh-btn" class="btn btn-sm btn-secondary">Copy</button>
-          </div>
+        <!-- Step-by-step non-technical guide -->
+        <div class="easy-token-guide">
+          <h4>✨ Create a Token in 3 Easy Clicks (No Technical Setup Needed)</h4>
+          <p>
+            To verify that you own your GitHub account and allow 1-click unfollowing, GitHub uses a temporary access code called a <strong>Personal Access Token</strong>.
+          </p>
+          <ol class="step-list">
+            <li>
+              Click the button below. It opens your GitHub settings with the name and the <strong><code>user:follow</code></strong> checkbox <strong>already ticked for you</strong>:
+              <div style="margin-top: 8px;">
+                <a
+                  id="modal-create-token-link"
+                  href="https://github.com/settings/tokens/new?description=GitHub+Follow+Housekeeping&scopes=user:follow"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-primary btn-sm"
+                >
+                  Open GitHub Token Generator (Pre-filled) ↗
+                </a>
+              </div>
+            </li>
+            <li>
+              Scroll to the bottom of that GitHub page, click the green <strong>"Generate token"</strong> button, and copy the code starting with <code>ghp_</code>.
+            </li>
+            <li>
+              Paste that code in the box below and click <strong>Save &amp; Verify Token</strong>.
+            </li>
+          </ol>
         </div>
 
         <div class="auth-instructions">
-          <h4 id="modal-pat-heading">Option B: Personal Access Token (PAT)</h4>
+          <h4 id="modal-pat-heading">Paste Your GitHub Token</h4>
           <p id="modal-pat-desc">
-            Paste a GitHub token with the <code>user:follow</code> scope to enable rich GraphQL profile metrics and 1-click batch unfollowing.
+            Kept strictly in your browser's temporary session memory—never stored on any external server.
           </p>
           <input
             type="password"
             id="custom-pat-input"
             class="full-input"
-            placeholder="ghp_... or github_pat_..."
+            placeholder="Paste token here (e.g. ghp_xxxxxxxxxxxxxxxxxxxx)"
             autocomplete="off"
           />
         </div>
+
+        <div id="modal-gh-cli-section" class="auth-instructions">
+          <h4>Alternative (For Terminal / CLI Users): GitHub CLI (<code>gh</code>)</h4>
+          <p>When running locally via <code>npx</code>, you can grant <code>user:follow</code> to your local <code>gh</code> session:</p>
+          <div class="code-copy-row">
+            <code>gh auth refresh -h github.com -s user:follow</code>
+            <button type="button" id="modal-copy-gh-btn" class="btn btn-sm btn-secondary">Copy</button>
+          </div>
+        </div>
       </div>
       <div class="modal-footer">
-        <button type="button" id="clear-pat-btn" class="btn btn-secondary">Clear Custom Token</button>
+        <button type="button" id="clear-pat-btn" class="btn btn-secondary">Clear Token</button>
         <button type="button" id="save-pat-btn" class="btn btn-primary">Save &amp; Verify Token</button>
       </div>
     </div>
