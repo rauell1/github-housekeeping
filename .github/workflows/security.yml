@@ -1,0 +1,53 @@
+name: Security & Integrity Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify JavaScript syntax
+        run: |
+          node --check server.mjs
+          node --check public/app.js
+
+      - name: Verify zero runtime dependencies
+        run: |
+          node -e '
+            const pkg = require("./package.json");
+            if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
+              console.error("Unexpected runtime dependencies found:", pkg.dependencies);
+              process.exit(1);
+            }
+            console.log("OK: Zero runtime dependencies.");
+          '
+
+      - name: Verify no hardcoded GitHub tokens or eval()
+        run: |
+          if grep -rnE "gho_[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|eval\(" server.mjs public/; then
+            echo "ERROR: Potential secret or eval() detected!"
+            exit 1
+          fi
+          echo "OK: No hardcoded secrets or eval() found."
+
+      - name: Verify CSP & security headers file
+        run: |
+          grep -q "Content-Security-Policy:" public/_headers
+          grep -q "X-Frame-Options: DENY" public/_headers
+          grep -q "X-Content-Type-Options: nosniff" public/_headers
+          echo "OK: Security headers verified."

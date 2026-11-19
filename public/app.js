@@ -187,6 +187,8 @@ const els = {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -194,6 +196,18 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function safeHttpUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''));
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.href;
+    }
+  } catch {
+    // ignore invalid URLs
+  }
+  return '#';
 }
 
 function formatCount(num) {
@@ -1182,11 +1196,11 @@ function renderProfileAndStats() {
   if (!state.data) return;
   const { profile, nonFollowers, mutuals, fans, enriched } = state.data;
 
-  els.profileAvatar.src = profile.avatarUrl;
+  els.profileAvatar.src = safeHttpUrl(profile.avatarUrl);
   els.profileAvatar.alt = profile.login;
   els.profileName.textContent = profile.name || profile.login;
   els.profileLink.textContent = `@${profile.login} ↗`;
-  els.profileLink.href = profile.url;
+  els.profileLink.href = safeHttpUrl(profile.url);
   els.profileBio.textContent = profile.bio || '';
   els.scanModeChip.textContent = enriched
     ? '⚡ Enriched GraphQL Scan'
@@ -1441,8 +1455,8 @@ function renderUserCards() {
       const bioEsc = escapeHtml(u.bio || '');
       const companyEsc = escapeHtml(u.company || '');
       const locationEsc = escapeHtml(u.location || '');
-      const avatarEsc = escapeHtml(u.avatarUrl);
-      const urlEsc = escapeHtml(u.url);
+      const avatarEsc = escapeHtml(safeHttpUrl(u.avatarUrl));
+      const urlEsc = escapeHtml(safeHttpUrl(u.url));
       const isSel = state.selectedLogins.has(u.login);
       const allowlisted = isAllowlisted(u.login);
 
@@ -1609,11 +1623,12 @@ async function addToAllowlist(usernames) {
     const now = new Date().toISOString();
     for (const rawLogin of usernames) {
       const login = String(rawLogin || '').trim();
-      if (GITHUB_USERNAME_REGEX.test(login)) {
-        state.allowlist[login.toLowerCase()] = {
+      const lower = login.toLowerCase();
+      if (GITHUB_USERNAME_REGEX.test(login) && !FORBIDDEN_KEYS.has(lower)) {
+        state.allowlist[lower] = {
           login,
-          note: state.allowlist[login.toLowerCase()]?.note || '',
-          addedAt: state.allowlist[login.toLowerCase()]?.addedAt || now,
+          note: state.allowlist[lower]?.note || '',
+          addedAt: state.allowlist[lower]?.addedAt || now,
         };
       }
     }
@@ -2090,7 +2105,7 @@ function renderRepoCards() {
       const fullEsc = escapeHtml(r.fullName);
       const nameEsc = escapeHtml(r.name);
       const descEsc = escapeHtml(r.description || '');
-      const urlEsc = escapeHtml(r.htmlUrl);
+      const urlEsc = escapeHtml(safeHttpUrl(r.htmlUrl));
       const langEsc = escapeHtml(r.language || '');
       const isSel = state.selectedRepos.has(r.fullName);
       const actInfo = formatRelativeActivity(r.pushedAt);
@@ -3035,8 +3050,9 @@ els.importAllowlistInput.addEventListener('change', async (e) => {
       const now = new Date().toISOString();
       for (const [key, val] of Object.entries(parsed || {})) {
         const login = (val?.login || key || '').trim();
-        if (GITHUB_USERNAME_REGEX.test(login)) {
-          state.allowlist[login.toLowerCase()] = {
+        const lower = login.toLowerCase();
+        if (GITHUB_USERNAME_REGEX.test(login) && !FORBIDDEN_KEYS.has(lower)) {
+          state.allowlist[lower] = {
             login,
             note: typeof val?.note === 'string' ? val.note.slice(0, 200) : '',
             addedAt: val?.addedAt || now,

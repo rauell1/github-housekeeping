@@ -486,8 +486,32 @@ async function readJsonBody(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
+const SECURITY_HEADERS = {
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+};
+
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isSameOriginLocalRequest(req) {
+  const origin = req.headers.origin;
+  if (origin) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost') {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
+    ...SECURITY_HEADERS,
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
   });
@@ -517,6 +541,10 @@ const MIME_TYPES = {
 
 const server = http.createServer(async (req, res) => {
   try {
+    if ((req.method === 'POST' || req.method === 'DELETE') && !isSameOriginLocalRequest(req)) {
+      return sendJson(res, 403, { error: 'Forbidden cross-origin request' });
+    }
+
     const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || `${HOST}:${PORT}`}`);
     const pathname = parsedUrl.pathname;
 
@@ -559,8 +587,9 @@ const server = http.createServer(async (req, res) => {
       if (body.entries && typeof body.entries === 'object') {
         for (const [key, val] of Object.entries(body.entries)) {
           const login = (val?.login || key || '').trim();
-          if (GITHUB_USERNAME_REGEX.test(login)) {
-            current[login.toLowerCase()] = {
+          const lower = login.toLowerCase();
+          if (GITHUB_USERNAME_REGEX.test(login) && !FORBIDDEN_KEYS.has(lower)) {
+            current[lower] = {
               login,
               note: typeof val?.note === 'string' ? val.note.slice(0, 200) : '',
               addedAt: val?.addedAt || now,
@@ -571,11 +600,12 @@ const server = http.createServer(async (req, res) => {
         const note = typeof body.note === 'string' ? body.note.slice(0, 200) : '';
         for (const rawLogin of body.usernames) {
           const login = String(rawLogin || '').trim();
-          if (GITHUB_USERNAME_REGEX.test(login)) {
-            current[login.toLowerCase()] = {
+          const lower = login.toLowerCase();
+          if (GITHUB_USERNAME_REGEX.test(login) && !FORBIDDEN_KEYS.has(lower)) {
+            current[lower] = {
               login,
-              note: note || current[login.toLowerCase()]?.note || '',
-              addedAt: current[login.toLowerCase()]?.addedAt || now,
+              note: note || current[lower]?.note || '',
+              addedAt: current[lower]?.addedAt || now,
             };
           }
         }
@@ -893,8 +923,8 @@ const server = http.createServer(async (req, res) => {
 
     const safePath = pathname === '/' ? '/index.html' : pathname;
     const resolvedPath = path.resolve(PUBLIC_DIR, `.${safePath}`);
-    if (!resolvedPath.startsWith(PUBLIC_DIR)) {
-      res.writeHead(403);
+    if (resolvedPath !== PUBLIC_DIR && !resolvedPath.startsWith(PUBLIC_DIR + path.sep)) {
+      res.writeHead(403, SECURITY_HEADERS);
       return res.end('Forbidden');
     }
 
@@ -902,12 +932,16 @@ const server = http.createServer(async (req, res) => {
       const content = await fs.readFile(resolvedPath);
       const ext = path.extname(resolvedPath).toLowerCase();
       res.writeHead(200, {
+        ...SECURITY_HEADERS,
         'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
         'Cache-Control': 'no-cache',
       });
       res.end(content);
     } catch {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.writeHead(404, {
+        ...SECURITY_HEADERS,
+        'Content-Type': 'text/plain; charset=utf-8',
+      });
       res.end('Not found');
     }
   } catch (err) {
