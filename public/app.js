@@ -67,6 +67,7 @@ const els = {
   ownershipChip: document.getElementById('ownership-chip'),
   switchToViewerBtn: document.getElementById('switch-to-viewer-btn'),
   rescanBtn: document.getElementById('rescan-btn'),
+  copyListBtn: document.getElementById('copy-list-btn'),
   snapshotDiffBanner: document.getElementById('snapshot-diff-banner'),
   profileBio: document.getElementById('profile-bio'),
   exportCsvBtn: document.getElementById('export-csv-btn'),
@@ -114,6 +115,7 @@ const els = {
   batchAllowlistAddBtn: document.getElementById('batch-allowlist-add-btn'),
   batchAllowlistRemoveBtn: document.getElementById('batch-allowlist-remove-btn'),
   batchUnfollowBtn: document.getElementById('batch-unfollow-btn'),
+  batchArchiveReposBtn: document.getElementById('batch-archive-repos-btn'),
   batchDeleteReposBtn: document.getElementById('batch-delete-repos-btn'),
 
   welcomeState: document.getElementById('welcome-state'),
@@ -165,6 +167,7 @@ const els = {
   modalAuthScopes: document.getElementById('modal-auth-scopes'),
   modalFollowPerm: document.getElementById('modal-follow-perm'),
   modalDeleteRepoPerm: document.getElementById('modal-delete-repo-perm'),
+  modalRateLimit: document.getElementById('modal-rate-limit'),
   modalCreateTokenLink: document.getElementById('modal-create-token-link'),
   modalCreateRepoTokenLink: document.getElementById('modal-create-repo-token-link'),
   modalGhCliSection: document.getElementById('modal-gh-cli-section'),
@@ -525,6 +528,11 @@ async function checkWebClientAuthStatus() {
     isFineGrained || scopes.includes('user') || scopes.includes('user:follow');
   const hasRepoScope = isFineGrained || scopes.includes('repo');
   const hasDeleteRepoScope = isFineGrained || scopes.includes('delete_repo');
+  const rateLimit = {
+    limit: Number(res.headers.get('x-ratelimit-limit') || 0),
+    remaining: Number(res.headers.get('x-ratelimit-remaining') || 0),
+    reset: Number(res.headers.get('x-ratelimit-reset') || 0),
+  };
 
   return {
     mode: 'web-client',
@@ -538,6 +546,7 @@ async function checkWebClientAuthStatus() {
     hasFollowScope,
     hasRepoScope,
     hasDeleteRepoScope,
+    rateLimit,
   };
 }
 
@@ -671,6 +680,11 @@ function renderModeAndAuthUI() {
         ? '✅ Enabled (Verified owner can delete repos)'
         : '⚠️ Missing delete_repo scope (Repo view is read-only)';
     }
+    if (els.modalRateLimit) {
+      els.modalRateLimit.textContent = s.rateLimit?.limit
+        ? `${s.rateLimit.remaining.toLocaleString()} / ${s.rateLimit.limit.toLocaleString()} requests remaining`
+        : '5,000 requests/hr';
+    }
   } else {
     els.modalAuthSource.textContent = 'None (Public Read-Only API)';
     els.modalAuthUser.textContent = 'Not signed in';
@@ -678,6 +692,9 @@ function renderModeAndAuthUI() {
     els.modalFollowPerm.textContent = '❌ Sign in with token to verify ownership & unfollow';
     if (els.modalDeleteRepoPerm) {
       els.modalDeleteRepoPerm.textContent = '❌ Sign in with delete_repo token to delete repos';
+    }
+    if (els.modalRateLimit) {
+      els.modalRateLimit.textContent = '60 requests/hr (unauthenticated public limit)';
     }
   }
 }
@@ -1134,6 +1151,9 @@ function renderProfileAndStats() {
   els.batchAllowlistRemoveBtn.classList.toggle('hidden', state.activeTab !== 'allowlist');
   els.batchAllowlistAddBtn.classList.toggle('hidden', state.activeTab === 'allowlist' || isRepoTab);
   els.batchUnfollowBtn.classList.toggle('hidden', isRepoTab);
+  if (els.batchArchiveReposBtn) {
+    els.batchArchiveReposBtn.classList.toggle('hidden', !isRepoTab);
+  }
   if (els.batchDeleteReposBtn) {
     els.batchDeleteReposBtn.classList.toggle('hidden', !isRepoTab);
   }
@@ -1872,6 +1892,9 @@ function updateRepoSelectionToolbar(visibleRepos) {
   }
 
   const isOwner = isViewingOwnVerifiedAccount();
+  if (els.batchArchiveReposBtn) {
+    els.batchArchiveReposBtn.disabled = selectedCount === 0 || !isOwner;
+  }
   if (els.batchDeleteReposBtn) {
     els.batchDeleteReposBtn.disabled = selectedCount === 0 || !isOwner;
     els.batchDeleteReposBtn.title = !isOwner
@@ -1958,11 +1981,21 @@ function renderRepoCards() {
         actionButtonHtml = `
           <button
             type="button"
+            class="btn btn-sm btn-secondary"
+            data-action="toggle-repo-archive"
+            data-repo="${fullEsc}"
+            data-archived="${r.isArchived ? 'true' : 'false'}"
+            title="${r.isArchived ? 'Unarchive repository' : 'Make read-only (reversible)'}"
+          >
+            ${r.isArchived ? 'Unarchive' : '📦 Archive'}
+          </button>
+          <button
+            type="button"
             class="btn btn-sm btn-danger"
             data-action="delete-repo-single"
             data-repo="${fullEsc}"
           >
-            🗑 Delete Repo
+            🗑 Delete
           </button>`;
       } else if (signedInAsDifferentUser) {
         actionButtonHtml = `
@@ -2215,6 +2248,77 @@ async function executePendingRepoDelete() {
   );
 }
 
+async function archiveRepos(repoFullNames, archived = true) {
+  if (!isViewingOwnVerifiedAccount()) {
+    updateTokenCreationLinks();
+    els.authModal.classList.remove('hidden');
+    return;
+  }
+  if (!repoFullNames || repoFullNames.length === 0) return;
+
+  const updatedSet = new Set();
+  if (state.runtimeMode === 'local-cli') {
+    const res = await fetch('/api/repos/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repos: repoFullNames, archived }),
+    });
+    const payload = await res.json();
+    if (!res.ok) {
+      showToast(payload.error || 'Failed to update repository archive state', 'error');
+      return;
+    }
+    for (const fullName of payload.succeeded || []) {
+      updatedSet.add(fullName.toLowerCase());
+      state.selectedRepos.delete(fullName);
+    }
+  } else {
+    const token = getBrowserPat();
+    if (!token) {
+      els.authModal.classList.remove('hidden');
+      return;
+    }
+    for (let i = 0; i < repoFullNames.length; i++) {
+      const fullName = repoFullNames[i];
+      const [owner, repoName] = fullName.split('/');
+      if (i > 0) await sleep(REPO_DELETE_DELAY_MS);
+      const res = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`,
+        {
+          method: 'PATCH',
+          headers: {
+            ...buildGitHubHeaders(token),
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ archived }),
+        }
+      );
+      if (res.ok) {
+        updatedSet.add(fullName.toLowerCase());
+        state.selectedRepos.delete(fullName);
+      } else if (res.status === 403 || res.status === 404) {
+        showToast('Token needs "repo" scope to archive/unarchive repositories', 'error');
+        return;
+      }
+    }
+  }
+
+  if (state.reposData?.repos && updatedSet.size > 0) {
+    for (const r of state.reposData.repos) {
+      if (updatedSet.has(r.fullName.toLowerCase())) {
+        r.isArchived = archived;
+      }
+    }
+  }
+  renderProfileAndStats();
+  renderRepoCards();
+  showToast(
+    `${archived ? 'Archived' : 'Unarchived'} ${updatedSet.size} repositor${
+      updatedSet.size === 1 ? 'y' : 'ies'
+    }`
+  );
+}
+
 function renderActiveView() {
   if (state.activeTab === 'repos') {
     loadAndRenderRepos();
@@ -2352,6 +2456,23 @@ if (els.rescanBtn) {
   els.rescanBtn.addEventListener('click', () => {
     const target = state.data?.profile?.login || els.usernameInput.value;
     if (target) scanAccount(target);
+  });
+}
+
+if (els.copyListBtn) {
+  els.copyListBtn.addEventListener('click', async () => {
+    let lines = [];
+    if (state.activeTab === 'repos') {
+      lines = getFilteredAndSortedRepos().map((r) => r.fullName);
+    } else {
+      lines = getFilteredAndSortedUsers().map((u) => `@${u.login}`);
+    }
+    if (lines.length === 0) {
+      showToast('Nothing in current view to copy', 'error');
+      return;
+    }
+    await navigator.clipboard.writeText(lines.join('\n'));
+    showToast(`Copied ${lines.length} item${lines.length === 1 ? '' : 's'} to clipboard`);
   });
 }
 
@@ -2496,6 +2617,12 @@ els.batchUnfollowBtn.addEventListener('click', () => {
   openUnfollowModal([...state.selectedLogins]);
 });
 
+if (els.batchArchiveReposBtn) {
+  els.batchArchiveReposBtn.addEventListener('click', () => {
+    archiveRepos([...state.selectedRepos], true);
+  });
+}
+
 if (els.batchDeleteReposBtn) {
   els.batchDeleteReposBtn.addEventListener('click', () => {
     openDeleteRepoModal([...state.selectedRepos]);
@@ -2538,6 +2665,12 @@ els.cardsGrid.addEventListener('click', (e) => {
     }
     state.lastClickedRepo = repo;
     renderRepoCards();
+    return;
+  }
+
+  if (action === 'toggle-repo-archive' && repo) {
+    const currentlyArchived = actionEl.dataset.archived === 'true';
+    archiveRepos([repo], !currentlyArchived);
     return;
   }
 

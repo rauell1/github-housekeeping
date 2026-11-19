@@ -158,6 +158,9 @@
           <button type="button" id="rescan-btn" class="btn btn-secondary btn-sm" title="Re-scan live data from GitHub">
             ↻ Refresh Live
           </button>
+          <button type="button" id="copy-list-btn" class="btn btn-secondary btn-sm" title="Copy visible usernames or repository names to clipboard">
+            📋 Copy List
+          </button>
           <button type="button" id="export-csv-btn" class="btn btn-secondary btn-sm">
             Export View (CSV)
           </button>
@@ -339,6 +342,9 @@
           <button type="button" id="batch-unfollow-btn" class="btn btn-sm btn-danger" disabled>
             Unfollow Selected (<span class="sel-count">0</span>)
           </button>
+          <button type="button" id="batch-archive-repos-btn" class="btn btn-sm btn-secondary hidden" disabled title="Make selected repositories read-only (reversible alternative to deleting)">
+            📦 Archive Selected (<span class="sel-count">0</span>)
+          </button>
           <button type="button" id="batch-delete-repos-btn" class="btn btn-sm btn-danger hidden" disabled>
             🗑 Delete Selected Repos (<span class="sel-count">0</span>)
           </button>
@@ -478,6 +484,7 @@
           <div><strong>Detected Scopes:</strong> <code id="modal-auth-scopes">-</code></div>
           <div><strong>Unfollow Permission (<code>user:follow</code>):</strong> <span id="modal-follow-perm">-</span></div>
           <div><strong>Delete Repo Permission (<code>delete_repo</code>):</strong> <span id="modal-delete-repo-perm">-</span></div>
+          <div><strong>API Rate Limit:</strong> <span id="modal-rate-limit">-</span></div>
         </div>
 
         <!-- Step-by-step non-technical guide -->

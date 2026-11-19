@@ -795,6 +795,97 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (pathname === '/api/repos/archive' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const repos = Array.isArray(body.repos) ? body.repos : [];
+      const archived = body.archived !== false;
+
+      if (repos.length === 0) {
+        return sendJson(res, 400, { error: 'No repositories provided.' });
+      }
+
+      const { token } = resolveAuthToken();
+      if (!token) {
+        return sendJson(res, 401, {
+          error: 'Authentication required to archive repositories.',
+          code: 'NO_TOKEN',
+        });
+      }
+
+      const viewerRes = await fetch('https://api.github.com/user', {
+        headers: buildGitHubHeaders(token),
+      });
+      if (!viewerRes.ok) {
+        return sendJson(res, 401, {
+          error: 'Could not verify token ownership.',
+          code: 'INVALID_TOKEN',
+        });
+      }
+      const viewer = await viewerRes.json();
+      const viewerLogin = String(viewer.login || '').toLowerCase();
+      const results = [];
+
+      for (let i = 0; i < repos.length; i++) {
+        const fullName = String(repos[i] || '').trim();
+        if (!GITHUB_REPO_FULLNAME_REGEX.test(fullName)) {
+          results.push({ fullName, ok: false, error: 'Invalid repository name' });
+          continue;
+        }
+
+        const [owner, repoName] = fullName.split('/');
+        if (owner.toLowerCase() !== viewerLogin) {
+          results.push({
+            fullName,
+            ok: false,
+            error: `Ownership check failed: only @${viewer.login} can archive their own repositories`,
+          });
+          continue;
+        }
+
+        if (i > 0) {
+          await sleep(REPO_DELETE_DELAY_MS);
+        }
+
+        const patchRes = await fetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`,
+          {
+            method: 'PATCH',
+            headers: {
+              ...buildGitHubHeaders(token),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ archived }),
+          }
+        );
+
+        if (patchRes.ok) {
+          results.push({ fullName, ok: true, archived });
+        } else {
+          const currentScopes = patchRes.headers.get('x-oauth-scopes') || '';
+          const errBody = await patchRes.json().catch(() => ({}));
+          const isFineGrained = token.startsWith('github_pat_');
+          if (!isFineGrained && (patchRes.status === 403 || patchRes.status === 404) && !currentScopes.includes('repo')) {
+            return sendJson(res, 403, {
+              error: 'Your current GitHub token is missing the "repo" scope required to archive repositories.',
+              code: 'MISSING_REPO_SCOPE',
+              results,
+            });
+          }
+          results.push({
+            fullName,
+            ok: false,
+            error: errBody.message || `HTTP ${patchRes.status}`,
+          });
+        }
+      }
+
+      return sendJson(res, 200, {
+        results,
+        succeeded: results.filter((r) => r.ok).map((r) => r.fullName),
+        failed: results.filter((r) => !r.ok),
+      });
+    }
+
     const safePath = pathname === '/' ? '/index.html' : pathname;
     const resolvedPath = path.resolve(PUBLIC_DIR, `.${safePath}`);
     if (!resolvedPath.startsWith(PUBLIC_DIR)) {
