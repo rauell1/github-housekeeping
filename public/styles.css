@@ -1518,3 +1518,58 @@ body {
   padding-top: 0;
   min-width: 220px;
 }
+
+/* Repository Badges & Delete Confirmation Warning */
+.badge-private {
+  background: rgba(210, 153, 34, 0.16);
+  color: var(--accent-amber-text);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+}
+
+.badge-public {
+  background: rgba(63, 185, 80, 0.14);
+  color: var(--accent-green-bright);
+  border: 1px solid rgba(63, 185, 80, 0.3);
+}
+
+.badge-fork {
+  background: rgba(163, 113, 247, 0.14);
+  color: var(--accent-purple-text);
+  border: 1px solid rgba(163, 113, 247, 0.35);
+}
+
+.badge-archived {
+  background: var(--code-bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+}
+
+.modal-danger-warning {
+  background: rgba(218, 54, 51, 0.1);
+  border: 1px solid rgba(248, 81, 73, 0.45);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-size: 13px;
+  color: var(--accent-danger-bright);
+}
+
+.modal-danger-warning p {
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.confirm-type-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.confirm-type-wrap code {
+  background: var(--code-bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  color: var(--accent-danger-bright);
+}

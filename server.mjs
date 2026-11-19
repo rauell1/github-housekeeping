@@ -43,7 +43,9 @@ const DATA_DIR = existsSync(path.join(__dirname, '.git')) || existsSync(localDat
 const ALLOWLIST_FILE = path.join(DATA_DIR, 'allowlist.json');
 
 const GITHUB_USERNAME_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
+const GITHUB_REPO_FULLNAME_REGEX = /^[a-zA-Z0-9-]+\/[a-zA-Z0-9._-]+$/;
 const UNFOLLOW_DELAY_MS = 300; // Serial pacing to respect GitHub secondary rate limits
+const REPO_DELETE_DELAY_MS = 350;
 
 if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -152,6 +154,8 @@ async function fetchAuthStatus() {
   const isFineGrained = token.startsWith('github_pat_');
   const hasFollowScope =
     isFineGrained || scopes.includes('user') || scopes.includes('user:follow');
+  const hasRepoScope = isFineGrained || scopes.includes('repo');
+  const hasDeleteRepoScope = isFineGrained || scopes.includes('delete_repo');
 
   const rateLimit = {
     limit: Number(res.headers.get('x-ratelimit-limit') || 0),
@@ -169,6 +173,8 @@ async function fetchAuthStatus() {
     scopes,
     isFineGrained,
     hasFollowScope,
+    hasRepoScope,
+    hasDeleteRepoScope,
     rateLimit,
     allowlistPath: ALLOWLIST_FILE,
   };
@@ -397,6 +403,75 @@ async function analyzeUser(username) {
   };
 }
 
+async function fetchUserRepos(username) {
+  if (!GITHUB_USERNAME_REGEX.test(username)) {
+    throw new Error('Invalid GitHub username format.');
+  }
+
+  const { token } = resolveAuthToken();
+  let isOwner = false;
+
+  if (token) {
+    const authRes = await fetch('https://api.github.com/user', {
+      headers: buildGitHubHeaders(token),
+    });
+    if (authRes.ok) {
+      const me = await authRes.json();
+      isOwner = String(me.login || '').toLowerCase() === username.toLowerCase();
+    }
+  }
+
+  const repos = [];
+  let page = 1;
+  while (page <= 30) {
+    const endpoint = isOwner
+      ? `https://api.github.com/user/repos?per_page=100&affiliation=owner&sort=updated&page=${page}`
+      : `https://api.github.com/users/${encodeURIComponent(
+          username
+        )}/repos?per_page=100&type=owner&sort=updated&page=${page}`;
+
+    const res = await fetch(endpoint, { headers: buildGitHubHeaders(token) });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.message || `GitHub API returned ${res.status}`);
+    }
+    const batch = await res.json();
+    if (!Array.isArray(batch) || batch.length === 0) break;
+
+    for (const r of batch) {
+      repos.push({
+        id: r.id,
+        name: r.name,
+        fullName: r.full_name,
+        owner: r.owner?.login || username,
+        htmlUrl: r.html_url,
+        description: r.description || '',
+        isPrivate: Boolean(r.private),
+        isFork: Boolean(r.fork),
+        isArchived: Boolean(r.archived),
+        language: r.language || '',
+        stargazersCount: Number(r.stargazers_count || 0),
+        forksCount: Number(r.forks_count || 0),
+        openIssuesCount: Number(r.open_issues_count || 0),
+        sizeKb: Number(r.size || 0),
+        pushedAt: r.pushed_at || r.updated_at || null,
+        updatedAt: r.updated_at || null,
+        createdAt: r.created_at || null,
+      });
+    }
+
+    if (batch.length < 100) break;
+    page++;
+  }
+
+  return {
+    username,
+    includesPrivate: isOwner,
+    count: repos.length,
+    repos,
+  };
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   let totalBytes = 0;
@@ -608,6 +683,114 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         results,
         succeeded: results.filter((r) => r.ok).map((r) => r.login),
+        failed: results.filter((r) => !r.ok),
+      });
+    }
+
+    if (pathname === '/api/repos' && req.method === 'GET') {
+      let username = (parsedUrl.searchParams.get('username') || '').trim();
+      if (!username) {
+        const status = await fetchAuthStatus();
+        username = status.viewerLogin || '';
+      }
+      if (!username) {
+        return sendJson(res, 400, {
+          error: 'Please provide a GitHub username to list repositories.',
+        });
+      }
+      const result = await fetchUserRepos(username);
+      return sendJson(res, 200, result);
+    }
+
+    if (pathname === '/api/repos/delete' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const repos = Array.isArray(body.repos) ? body.repos : [];
+      if (repos.length === 0) {
+        return sendJson(res, 400, { error: 'No repositories provided.' });
+      }
+
+      const { token } = resolveAuthToken();
+      if (!token) {
+        return sendJson(res, 401, {
+          error: 'Authentication required to delete repositories.',
+          code: 'NO_TOKEN',
+        });
+      }
+
+      const viewerRes = await fetch('https://api.github.com/user', {
+        headers: buildGitHubHeaders(token),
+      });
+      if (!viewerRes.ok) {
+        return sendJson(res, 401, {
+          error: 'Could not verify token ownership.',
+          code: 'INVALID_TOKEN',
+        });
+      }
+      const viewer = await viewerRes.json();
+      const viewerLogin = String(viewer.login || '').toLowerCase();
+      const results = [];
+
+      for (let i = 0; i < repos.length; i++) {
+        const fullName = String(repos[i] || '').trim();
+        if (!GITHUB_REPO_FULLNAME_REGEX.test(fullName)) {
+          results.push({ fullName, ok: false, error: 'Invalid repository name' });
+          continue;
+        }
+
+        const [owner, repoName] = fullName.split('/');
+        if (owner.toLowerCase() !== viewerLogin) {
+          results.push({
+            fullName,
+            ok: false,
+            error: `Ownership check failed: only @${viewer.login} can delete their own repositories`,
+          });
+          continue;
+        }
+
+        if (i > 0) {
+          await sleep(REPO_DELETE_DELAY_MS);
+        }
+
+        const delRes = await fetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`,
+          {
+            method: 'DELETE',
+            headers: buildGitHubHeaders(token),
+          }
+        );
+
+        if (delRes.status === 204) {
+          results.push({ fullName, ok: true });
+        } else {
+          const currentScopes = delRes.headers.get('x-oauth-scopes') || '';
+          const errBody = await delRes.json().catch(() => ({}));
+          const isFineGrained = token.startsWith('github_pat_');
+          const missingDeleteScope =
+            !isFineGrained &&
+            (delRes.status === 403 || delRes.status === 404) &&
+            !currentScopes.includes('delete_repo');
+
+          if (missingDeleteScope) {
+            return sendJson(res, 403, {
+              error:
+                'Your current GitHub token is missing the "delete_repo" scope required to delete repositories.',
+              code: 'MISSING_DELETE_REPO_SCOPE',
+              currentScopes,
+              results,
+            });
+          }
+
+          results.push({
+            fullName,
+            ok: false,
+            error: errBody.message || `HTTP ${delRes.status}`,
+          });
+        }
+      }
+
+      return sendJson(res, 200, {
+        results,
+        succeeded: results.filter((r) => r.ok).map((r) => r.fullName),
         failed: results.filter((r) => !r.ok),
       });
     }

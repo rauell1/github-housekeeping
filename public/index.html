@@ -217,6 +217,9 @@
           <button type="button" class="tab-btn" data-tab="fans">
             Followers You Don't Follow <span id="tab-count-fans" class="tab-badge">0</span>
           </button>
+          <button type="button" class="tab-btn" data-tab="repos">
+            📦 Repositories <span id="tab-count-repos" class="tab-badge">-</span>
+          </button>
         </div>
 
         <label id="include-allowlisted-wrap" class="toggle-inline">
@@ -237,7 +240,7 @@
           />
         </div>
 
-        <div class="preset-pills" role="group" aria-label="Quick filters">
+        <div id="user-preset-pills" class="preset-pills" role="group" aria-label="Quick filters">
           <button type="button" class="pill-btn active" data-preset="all">All</button>
           <button type="button" class="pill-btn" data-preset="popular" title="Accounts with 1,000+ followers (requires token/GraphQL scan)">
             Popular (&ge;1k followers)
@@ -253,8 +256,18 @@
           </button>
         </div>
 
+        <div id="repo-preset-pills" class="preset-pills hidden" role="group" aria-label="Repository filters">
+          <button type="button" class="pill-btn repo-pill-btn active" data-repo-preset="all">All</button>
+          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="forks">⑂ Forks</button>
+          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="private">🔒 Private</button>
+          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="public">🌐 Public</button>
+          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="archived">📦 Archived</button>
+          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="dormant">💤 Dormant (&gt;1yr)</button>
+          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="zero-stars">0 Stars</button>
+        </div>
+
         <div class="view-and-sort">
-          <div class="sort-box">
+          <div id="user-sort-box" class="sort-box">
             <label for="sort-select">Sort:</label>
             <select id="sort-select">
               <option value="order-asc">Follow Order (Oldest first)</option>
@@ -264,6 +277,18 @@
               <option value="activity-asc">Activity (Dormant first)</option>
               <option value="repos-asc">Public Repos (Low &rarr; High)</option>
               <option value="login-asc">Username (A &rarr; Z)</option>
+            </select>
+          </div>
+
+          <div id="repo-sort-box" class="sort-box hidden">
+            <label for="repo-sort-select">Sort:</label>
+            <select id="repo-sort-select">
+              <option value="pushed-desc">Last Pushed (Newest)</option>
+              <option value="pushed-asc">Last Pushed (Oldest / Dormant)</option>
+              <option value="stars-asc">Stars (Low &rarr; High)</option>
+              <option value="stars-desc">Stars (High &rarr; Low)</option>
+              <option value="size-desc">Size (Largest first)</option>
+              <option value="name-asc">Name (A &rarr; Z)</option>
             </select>
           </div>
 
@@ -303,6 +328,9 @@
           </button>
           <button type="button" id="batch-unfollow-btn" class="btn btn-sm btn-danger" disabled>
             Unfollow Selected (<span class="sel-count">0</span>)
+          </button>
+          <button type="button" id="batch-delete-repos-btn" class="btn btn-sm btn-danger hidden" disabled>
+            🗑 Delete Selected Repos (<span class="sel-count">0</span>)
           </button>
         </div>
       </div>
@@ -382,6 +410,49 @@
     </div>
   </div>
 
+  <!-- Confirmation Modal for Permanent Repository Deletion -->
+  <div id="delete-repo-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="delete-repo-modal-title">Permanently Delete Repositories</h3>
+        <button type="button" id="close-delete-repo-modal" class="icon-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-danger-warning">
+          <strong>Warning: This action is permanent and irreversible.</strong>
+          <p id="delete-repo-modal-desc">
+            Deleting a repository permanently removes its code, issues, pull requests, wikis, and stars.
+          </p>
+        </div>
+        <div id="delete-repo-preview-list" class="preview-chip-list"></div>
+        <div id="delete-repo-confirm-wrap" class="confirm-type-wrap">
+          <label for="delete-repo-confirm-input">Type <code>DELETE</code> to enable permanent deletion:</label>
+          <input
+            type="text"
+            id="delete-repo-confirm-input"
+            class="full-input"
+            placeholder="Type DELETE"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div id="delete-repo-progress-wrap" class="progress-wrap hidden">
+          <div class="progress-bar-bg">
+            <div id="delete-repo-progress-bar" class="progress-bar-fill"></div>
+          </div>
+          <p id="delete-repo-progress-text" class="progress-text">Deleting repositories serially (350ms pacing)...</p>
+        </div>
+        <div id="delete-repo-modal-error" class="modal-error hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="cancel-delete-repo-btn" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="confirm-delete-repo-btn" class="btn btn-danger" disabled>
+          Permanently Delete
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Auth & Scope Configuration Modal -->
   <div id="auth-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal">
@@ -396,18 +467,19 @@
           <div><strong>Verified Account Owner:</strong> <span id="modal-auth-user">-</span></div>
           <div><strong>Detected Scopes:</strong> <code id="modal-auth-scopes">-</code></div>
           <div><strong>Unfollow Permission (<code>user:follow</code>):</strong> <span id="modal-follow-perm">-</span></div>
+          <div><strong>Delete Repo Permission (<code>delete_repo</code>):</strong> <span id="modal-delete-repo-perm">-</span></div>
         </div>
 
         <!-- Step-by-step non-technical guide -->
         <div class="easy-token-guide">
           <h4>✨ Create a Token in 3 Easy Clicks (No Technical Setup Needed)</h4>
           <p>
-            To verify that you own your GitHub account and allow 1-click unfollowing, GitHub uses a temporary access code called a <strong>Personal Access Token</strong>.
+            To verify that you own your GitHub account, GitHub uses a temporary access code called a <strong>Personal Access Token</strong>.
           </p>
           <ol class="step-list">
             <li>
-              Click the button below. It opens your GitHub settings with the name and the <strong><code>user:follow</code></strong> checkbox <strong>already ticked for you</strong>:
-              <div style="margin-top: 8px;">
+              Choose the permission level you need. It opens GitHub with the boxes <strong>already ticked for you</strong>:
+              <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
                 <a
                   id="modal-create-token-link"
                   href="https://github.com/settings/tokens/new?description=GitHub+Follow+Housekeeping&scopes=user:follow"
@@ -415,7 +487,16 @@
                   rel="noopener noreferrer"
                   class="btn btn-primary btn-sm"
                 >
-                  Open GitHub Token Generator (Pre-filled) ↗
+                  Follow Housekeeping Only (user:follow) ↗
+                </a>
+                <a
+                  id="modal-create-repo-token-link"
+                  href="https://github.com/settings/tokens/new?description=GitHub+Follow+%26+Repo+Housekeeping&scopes=user:follow,delete_repo,repo"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-secondary btn-sm"
+                >
+                  Follow + Repo Deletion (user:follow, delete_repo, repo) ↗
                 </a>
               </div>
             </li>
@@ -444,9 +525,9 @@
 
         <div id="modal-gh-cli-section" class="auth-instructions">
           <h4>Alternative (For Terminal / CLI Users): GitHub CLI (<code>gh</code>)</h4>
-          <p>When running locally via <code>npx</code>, you can grant <code>user:follow</code> to your local <code>gh</code> session:</p>
+          <p>When running locally via <code>npx</code>, grant <code>user:follow</code> (and optionally <code>delete_repo</code>) to your local <code>gh</code> session:</p>
           <div class="code-copy-row">
-            <code>gh auth refresh -h github.com -s user:follow</code>
+            <code>gh auth refresh -h github.com -s user:follow,delete_repo</code>
             <button type="button" id="modal-copy-gh-btn" class="btn btn-sm btn-secondary">Copy</button>
           </div>
         </div>

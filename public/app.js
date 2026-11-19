@@ -5,6 +5,7 @@ const SNAPSHOT_KEY_PREFIX = 'gh_housekeeping_snapshot_v1_';
 const SESSION_STORAGE_PAT_KEY = 'gh_housekeeping_pat_v1';
 const GITHUB_USERNAME_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 const UNFOLLOW_DELAY_MS = 300;
+const REPO_DELETE_DELAY_MS = 350;
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 const state = {
@@ -13,15 +14,22 @@ const state = {
   viewMode: 'grid', // 'grid' | 'compact'
   auth: null,
   data: null,
+  reposData: null, // { username, includesPrivate, repos: [...] }
+  reposLoading: false,
   allowlist: {},
-  activeTab: 'non-followers', // 'non-followers' | 'allowlist' | 'mutuals' | 'fans'
+  activeTab: 'non-followers', // 'non-followers' | 'allowlist' | 'mutuals' | 'fans' | 'repos'
   showAllowlistedInNonFollowers: false,
   searchQuery: '',
   preset: 'all', // 'all' | 'popular' | 'regular' | 'dormant' | 'zero-repos'
+  repoPreset: 'all', // 'all' | 'forks' | 'private' | 'public' | 'archived' | 'dormant' | 'zero-stars'
   sortBy: 'order-asc',
+  repoSortBy: 'pushed-desc',
   selectedLogins: new Set(),
+  selectedRepos: new Set(),
   lastClickedLogin: null,
+  lastClickedRepo: null,
   pendingUnfollowLogins: [],
+  pendingDeleteRepos: [],
 };
 
 const els = {
@@ -81,12 +89,19 @@ const els = {
   tabCountAllowlist: document.getElementById('tab-count-allowlist'),
   tabCountMutuals: document.getElementById('tab-count-mutuals'),
   tabCountFans: document.getElementById('tab-count-fans'),
+  tabCountRepos: document.getElementById('tab-count-repos'),
   includeAllowlistedWrap: document.getElementById('include-allowlisted-wrap'),
   showAllowlistedCheckbox: document.getElementById('show-allowlisted-in-nonfollowers'),
 
   searchInput: document.getElementById('search-input'),
-  presetBtns: document.querySelectorAll('.pill-btn'),
+  userPresetPills: document.getElementById('user-preset-pills'),
+  repoPresetPills: document.getElementById('repo-preset-pills'),
+  presetBtns: document.querySelectorAll('.pill-btn[data-preset]'),
+  repoPresetBtns: document.querySelectorAll('.repo-pill-btn[data-repo-preset]'),
+  userSortBox: document.getElementById('user-sort-box'),
+  repoSortBox: document.getElementById('repo-sort-box'),
   sortSelect: document.getElementById('sort-select'),
+  repoSortSelect: document.getElementById('repo-sort-select'),
   viewGridBtn: document.getElementById('view-grid-btn'),
   viewCompactBtn: document.getElementById('view-compact-btn'),
 
@@ -97,6 +112,7 @@ const els = {
   batchAllowlistAddBtn: document.getElementById('batch-allowlist-add-btn'),
   batchAllowlistRemoveBtn: document.getElementById('batch-allowlist-remove-btn'),
   batchUnfollowBtn: document.getElementById('batch-unfollow-btn'),
+  batchDeleteReposBtn: document.getElementById('batch-delete-repos-btn'),
 
   welcomeState: document.getElementById('welcome-state'),
   loadingState: document.getElementById('loading-state'),
@@ -123,6 +139,21 @@ const els = {
   cancelUnfollowBtn: document.getElementById('cancel-unfollow-btn'),
   confirmUnfollowBtn: document.getElementById('confirm-unfollow-btn'),
 
+  // Delete Repo Modal
+  deleteRepoModal: document.getElementById('delete-repo-modal'),
+  deleteRepoModalTitle: document.getElementById('delete-repo-modal-title'),
+  deleteRepoModalDesc: document.getElementById('delete-repo-modal-desc'),
+  deleteRepoPreviewList: document.getElementById('delete-repo-preview-list'),
+  deleteRepoConfirmWrap: document.getElementById('delete-repo-confirm-wrap'),
+  deleteRepoConfirmInput: document.getElementById('delete-repo-confirm-input'),
+  deleteRepoProgressWrap: document.getElementById('delete-repo-progress-wrap'),
+  deleteRepoProgressBar: document.getElementById('delete-repo-progress-bar'),
+  deleteRepoProgressText: document.getElementById('delete-repo-progress-text'),
+  deleteRepoModalError: document.getElementById('delete-repo-modal-error'),
+  closeDeleteRepoModal: document.getElementById('close-delete-repo-modal'),
+  cancelDeleteRepoBtn: document.getElementById('cancel-delete-repo-btn'),
+  confirmDeleteRepoBtn: document.getElementById('confirm-delete-repo-btn'),
+
   // Auth Modal
   authModal: document.getElementById('auth-modal'),
   closeAuthModal: document.getElementById('close-auth-modal'),
@@ -131,7 +162,9 @@ const els = {
   modalAuthUser: document.getElementById('modal-auth-user'),
   modalAuthScopes: document.getElementById('modal-auth-scopes'),
   modalFollowPerm: document.getElementById('modal-follow-perm'),
+  modalDeleteRepoPerm: document.getElementById('modal-delete-repo-perm'),
   modalCreateTokenLink: document.getElementById('modal-create-token-link'),
+  modalCreateRepoTokenLink: document.getElementById('modal-create-repo-token-link'),
   modalGhCliSection: document.getElementById('modal-gh-cli-section'),
   modalPatHeading: document.getElementById('modal-pat-heading'),
   modalPatDesc: document.getElementById('modal-pat-desc'),
@@ -359,6 +392,10 @@ function updateTokenCreationLinks(targetUsername) {
     description
   )}&scopes=user:follow`;
 
+  const repoUrl = `https://github.com/settings/tokens/new?description=${encodeURIComponent(
+    cleanUser ? `GitHub Follow & Repo Housekeeping (@${cleanUser})` : 'GitHub Follow & Repo Housekeeping'
+  )}&scopes=user:follow,delete_repo,repo`;
+
   if (els.bannerCreateTokenLink) {
     els.bannerCreateTokenLink.href = url;
     els.bannerCreateTokenLink.textContent = cleanUser
@@ -368,8 +405,14 @@ function updateTokenCreationLinks(targetUsername) {
   if (els.modalCreateTokenLink) {
     els.modalCreateTokenLink.href = url;
     els.modalCreateTokenLink.textContent = cleanUser
-      ? `Open GitHub Token Generator for @${cleanUser} (Pre-filled) ↗`
-      : 'Open GitHub Token Generator (Pre-filled) ↗';
+      ? `Follow Only (@${cleanUser}: user:follow) ↗`
+      : 'Follow Housekeeping Only (user:follow) ↗';
+  }
+  if (els.modalCreateRepoTokenLink) {
+    els.modalCreateRepoTokenLink.href = repoUrl;
+    els.modalCreateRepoTokenLink.textContent = cleanUser
+      ? `Follow + Repo Deletion (@${cleanUser}: delete_repo, repo) ↗`
+      : 'Follow + Repo Deletion (user:follow, delete_repo, repo) ↗';
   }
 }
 
@@ -478,6 +521,8 @@ async function checkWebClientAuthStatus() {
   const isFineGrained = token.startsWith('github_pat_');
   const hasFollowScope =
     isFineGrained || scopes.includes('user') || scopes.includes('user:follow');
+  const hasRepoScope = isFineGrained || scopes.includes('repo');
+  const hasDeleteRepoScope = isFineGrained || scopes.includes('delete_repo');
 
   return {
     mode: 'web-client',
@@ -489,6 +534,8 @@ async function checkWebClientAuthStatus() {
     scopes,
     isFineGrained,
     hasFollowScope,
+    hasRepoScope,
+    hasDeleteRepoScope,
   };
 }
 
@@ -617,11 +664,19 @@ function renderModeAndAuthUI() {
     els.modalFollowPerm.textContent = s.hasFollowScope
       ? '✅ Enabled (Verified owner can unfollow)'
       : '⚠️ Missing user:follow scope (Read-only)';
+    if (els.modalDeleteRepoPerm) {
+      els.modalDeleteRepoPerm.textContent = s.hasDeleteRepoScope
+        ? '✅ Enabled (Verified owner can delete repos)'
+        : '⚠️ Missing delete_repo scope (Repo view is read-only)';
+    }
   } else {
     els.modalAuthSource.textContent = 'None (Public Read-Only API)';
     els.modalAuthUser.textContent = 'Not signed in';
     els.modalAuthScopes.textContent = 'none';
     els.modalFollowPerm.textContent = '❌ Sign in with token to verify ownership & unfollow';
+    if (els.modalDeleteRepoPerm) {
+      els.modalDeleteRepoPerm.textContent = '❌ Sign in with delete_repo token to delete repos';
+    }
   }
 }
 
@@ -896,10 +951,16 @@ async function scanAccount(username) {
     }
 
     state.data = payload;
+    state.reposData = null;
     state.allowlist = payload.allowlist || {};
     saveLocalAllowlist(state.allowlist);
     state.selectedLogins.clear();
+    state.selectedRepos.clear();
     state.lastClickedLogin = null;
+    state.lastClickedRepo = null;
+    if (els.tabCountRepos) {
+      els.tabCountRepos.textContent = '-';
+    }
 
     // Sync ?user= query param in browser URL without reloading
     try {
@@ -918,7 +979,11 @@ async function scanAccount(username) {
 
     renderModeAndAuthUI();
     renderProfileAndStats();
-    renderUserCards();
+    if (state.activeTab === 'repos') {
+      await loadAndRenderRepos();
+    } else {
+      renderUserCards();
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     els.loadingState.classList.add('hidden');
@@ -1027,6 +1092,9 @@ function renderProfileAndStats() {
   els.tabCountAllowlist.textContent = totalAllowlistedCount;
   els.tabCountMutuals.textContent = mutuals.length;
   els.tabCountFans.textContent = fans.length;
+  if (els.tabCountRepos && state.reposData) {
+    els.tabCountRepos.textContent = state.reposData.repos.length;
+  }
 
   els.statCards.forEach((card) => {
     card.classList.toggle('active', card.dataset.tab === state.activeTab);
@@ -1035,9 +1103,24 @@ function renderProfileAndStats() {
     btn.classList.toggle('active', btn.dataset.tab === state.activeTab);
   });
 
+  const isRepoTab = state.activeTab === 'repos';
   els.includeAllowlistedWrap.classList.toggle('hidden', state.activeTab !== 'non-followers');
+  if (els.userPresetPills) els.userPresetPills.classList.toggle('hidden', isRepoTab);
+  if (els.repoPresetPills) els.repoPresetPills.classList.toggle('hidden', !isRepoTab);
+  if (els.userSortBox) els.userSortBox.classList.toggle('hidden', isRepoTab);
+  if (els.repoSortBox) els.repoSortBox.classList.toggle('hidden', !isRepoTab);
+  if (els.searchInput) {
+    els.searchInput.placeholder = isRepoTab
+      ? 'Filter by repository name, description, or language... (Press /)'
+      : 'Filter by username, name, bio, company, or location... (Press /)';
+  }
+
   els.batchAllowlistRemoveBtn.classList.toggle('hidden', state.activeTab !== 'allowlist');
-  els.batchAllowlistAddBtn.classList.toggle('hidden', state.activeTab === 'allowlist');
+  els.batchAllowlistAddBtn.classList.toggle('hidden', state.activeTab === 'allowlist' || isRepoTab);
+  els.batchUnfollowBtn.classList.toggle('hidden', isRepoTab);
+  if (els.batchDeleteReposBtn) {
+    els.batchDeleteReposBtn.classList.toggle('hidden', !isRepoTab);
+  }
 }
 
 function getFilteredAndSortedUsers() {
@@ -1574,7 +1657,578 @@ async function executePendingUnfollow() {
   );
 }
 
+// ==========================================
+// Repository Housekeeping (List & Mass Delete)
+// ==========================================
+
+function formatSizeKb(kb) {
+  if (!kb || kb <= 0) return '0 KB';
+  if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
+  return `${kb} KB`;
+}
+
+function isDormantRepo(repo) {
+  const ref = repo?.pushedAt || repo?.updatedAt;
+  if (!ref) return false;
+  const ts = Date.parse(ref);
+  if (Number.isNaN(ts)) return false;
+  return Date.now() - ts > ONE_YEAR_MS;
+}
+
+async function fetchClientReposDirect(username) {
+  const token = getBrowserPat();
+  const isOwner =
+    state.auth?.authenticated &&
+    state.auth?.viewerLogin &&
+    state.auth.viewerLogin.toLowerCase() === username.toLowerCase();
+
+  const repos = [];
+  let page = 1;
+  while (page <= 30) {
+    const endpoint = isOwner
+      ? `https://api.github.com/user/repos?per_page=100&affiliation=owner&sort=updated&page=${page}`
+      : `https://api.github.com/users/${encodeURIComponent(
+          username
+        )}/repos?per_page=100&type=owner&sort=updated&page=${page}`;
+
+    const res = await fetch(endpoint, { headers: buildGitHubHeaders(token) });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.message || `GitHub API returned ${res.status}`);
+    }
+    const batch = await res.json();
+    if (!Array.isArray(batch) || batch.length === 0) break;
+
+    for (const r of batch) {
+      repos.push({
+        id: r.id,
+        name: r.name,
+        fullName: r.full_name,
+        owner: r.owner?.login || username,
+        htmlUrl: r.html_url,
+        description: r.description || '',
+        isPrivate: Boolean(r.private),
+        isFork: Boolean(r.fork),
+        isArchived: Boolean(r.archived),
+        language: r.language || '',
+        stargazersCount: Number(r.stargazers_count || 0),
+        forksCount: Number(r.forks_count || 0),
+        openIssuesCount: Number(r.open_issues_count || 0),
+        sizeKb: Number(r.size || 0),
+        pushedAt: r.pushed_at || r.updated_at || null,
+        updatedAt: r.updated_at || null,
+        createdAt: r.created_at || null,
+      });
+    }
+
+    if (batch.length < 100) break;
+    page++;
+  }
+
+  return {
+    username,
+    includesPrivate: Boolean(isOwner),
+    count: repos.length,
+    repos,
+  };
+}
+
+async function loadAndRenderRepos(force = false) {
+  if (!state.data?.profile?.login) return;
+  const username = state.data.profile.login;
+
+  if (!force && state.reposData && state.reposData.username.toLowerCase() === username.toLowerCase()) {
+    renderProfileAndStats();
+    renderRepoCards();
+    return;
+  }
+
+  state.reposLoading = true;
+  els.loadingText.textContent = `Loading repositories for @${username}...`;
+  els.loadingState.classList.remove('hidden');
+  els.emptyState.classList.add('hidden');
+  els.errorState.classList.add('hidden');
+  els.cardsGrid.innerHTML = '';
+
+  try {
+    let payload;
+    if (state.runtimeMode === 'local-cli') {
+      const res = await fetch(`/api/repos?username=${encodeURIComponent(username)}`);
+      payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload.error || `HTTP ${res.status}`);
+      }
+    } else {
+      payload = await fetchClientReposDirect(username);
+    }
+
+    state.reposData = payload;
+    els.loadingState.classList.add('hidden');
+    renderProfileAndStats();
+    renderRepoCards();
+  } catch (err) {
+    els.loadingState.classList.add('hidden');
+    els.errorState.classList.remove('hidden');
+    els.errorMessage.textContent = err instanceof Error ? err.message : String(err);
+  } finally {
+    state.reposLoading = false;
+  }
+}
+
+function getFilteredAndSortedRepos() {
+  if (!state.reposData?.repos) return [];
+  let base = [...state.reposData.repos];
+
+  const q = state.searchQuery.trim().toLowerCase();
+  if (q) {
+    base = base.filter(
+      (r) =>
+        r.name.toLowerCase().includes(q) ||
+        r.fullName.toLowerCase().includes(q) ||
+        (r.description && r.description.toLowerCase().includes(q)) ||
+        (r.language && r.language.toLowerCase().includes(q))
+    );
+  }
+
+  if (state.repoPreset === 'forks') {
+    base = base.filter((r) => r.isFork);
+  } else if (state.repoPreset === 'private') {
+    base = base.filter((r) => r.isPrivate);
+  } else if (state.repoPreset === 'public') {
+    base = base.filter((r) => !r.isPrivate);
+  } else if (state.repoPreset === 'archived') {
+    base = base.filter((r) => r.isArchived);
+  } else if (state.repoPreset === 'dormant') {
+    base = base.filter((r) => isDormantRepo(r));
+  } else if (state.repoPreset === 'zero-stars') {
+    base = base.filter((r) => r.stargazersCount === 0);
+  }
+
+  base.sort((a, b) => {
+    switch (state.repoSortBy) {
+      case 'pushed-desc':
+        return Date.parse(b.pushedAt || 0) - Date.parse(a.pushedAt || 0);
+      case 'pushed-asc':
+        return Date.parse(a.pushedAt || 0) - Date.parse(b.pushedAt || 0);
+      case 'stars-asc':
+        return a.stargazersCount - b.stargazersCount;
+      case 'stars-desc':
+        return b.stargazersCount - a.stargazersCount;
+      case 'size-desc':
+        return b.sizeKb - a.sizeKb;
+      case 'name-asc':
+        return a.name.localeCompare(b.name);
+      default:
+        return 0;
+    }
+  });
+
+  return base;
+}
+
+function updateRepoSelectionToolbar(visibleRepos) {
+  const visibleNames = visibleRepos.map((r) => r.fullName);
+  const selectedCount = state.selectedRepos.size;
+  const allVisibleSelected =
+    visibleNames.length > 0 && visibleNames.every((name) => state.selectedRepos.has(name));
+
+  els.selectAllCheckbox.checked = allVisibleSelected;
+  els.selectAllCheckbox.indeterminate =
+    !allVisibleSelected && visibleNames.some((name) => state.selectedRepos.has(name));
+
+  if (selectedCount > 0) {
+    els.selectionSummary.textContent = `${selectedCount} repo${
+      selectedCount === 1 ? '' : 's'
+    } selected (of ${visibleNames.length} visible)`;
+    els.clearSelectionBtn.classList.remove('hidden');
+  } else {
+    els.selectionSummary.textContent = `Select All Visible (${visibleNames.length})`;
+    els.clearSelectionBtn.classList.add('hidden');
+  }
+
+  document.querySelectorAll('.sel-count').forEach((el) => {
+    el.textContent = String(selectedCount);
+  });
+
+  if (els.autoShieldPopularBtn) {
+    els.autoShieldPopularBtn.classList.add('hidden');
+  }
+
+  const isOwner = isViewingOwnVerifiedAccount();
+  if (els.batchDeleteReposBtn) {
+    els.batchDeleteReposBtn.disabled = selectedCount === 0 || !isOwner;
+    els.batchDeleteReposBtn.title = !isOwner
+      ? 'Sign in with a token matching this GitHub account (with delete_repo scope) to delete repositories'
+      : '';
+  }
+}
+
+function renderRepoCards() {
+  if (!state.reposData) return;
+  const visibleRepos = getFilteredAndSortedRepos();
+  updateRepoSelectionToolbar(visibleRepos);
+
+  if (visibleRepos.length === 0) {
+    els.cardsGrid.innerHTML = '';
+    els.emptyState.classList.remove('hidden');
+    els.emptyTitle.textContent = 'No repositories match this view';
+    els.emptySubtitle.textContent = 'Try adjusting your search or repository filter pills.';
+    return;
+  }
+
+  els.emptyState.classList.add('hidden');
+  const isOwner = isViewingOwnVerifiedAccount();
+  const signedInAsDifferentUser =
+    state.auth?.authenticated && state.auth?.viewerLogin && !isOwner;
+
+  const html = visibleRepos
+    .map((r) => {
+      const fullEsc = escapeHtml(r.fullName);
+      const nameEsc = escapeHtml(r.name);
+      const descEsc = escapeHtml(r.description || '');
+      const urlEsc = escapeHtml(r.htmlUrl);
+      const langEsc = escapeHtml(r.language || '');
+      const isSel = state.selectedRepos.has(r.fullName);
+      const actInfo = formatRelativeActivity(r.pushedAt);
+
+      const visBadge = r.isPrivate
+        ? `<span class="badge badge-private">🔒 Private</span>`
+        : `<span class="badge badge-public">🌐 Public</span>`;
+      const forkBadge = r.isFork ? `<span class="badge badge-fork">⑂ Fork</span>` : '';
+      const archBadge = r.isArchived ? `<span class="badge badge-archived">📦 Archived</span>` : '';
+      const activityBadge = actInfo
+        ? `<span class="badge ${actInfo.dormant ? 'badge-dormant' : 'badge-active'}">${escapeHtml(
+            actInfo.label
+          )}</span>`
+        : '';
+
+      const metaParts = [];
+      if (langEsc) metaParts.push(`<span>💻 ${langEsc}</span>`);
+      metaParts.push(`<span>💾 ${formatSizeKb(r.sizeKb)}</span>`);
+
+      let actionButtonHtml = '';
+      if (isOwner) {
+        actionButtonHtml = `
+          <button
+            type="button"
+            class="btn btn-sm btn-danger"
+            data-action="delete-repo-single"
+            data-repo="${fullEsc}"
+          >
+            🗑 Delete Repo
+          </button>`;
+      } else if (signedInAsDifferentUser) {
+        actionButtonHtml = `
+          <button type="button" class="btn btn-sm btn-secondary" disabled>
+            🔒 Not Your Account
+          </button>`;
+      } else {
+        actionButtonHtml = `
+          <button type="button" class="btn btn-sm btn-secondary" data-action="prompt-signin">
+            🔑 Sign in to Delete
+          </button>`;
+      }
+
+      return `
+        <article class="user-card ${isSel ? 'selected' : ''}" data-repo="${fullEsc}">
+          <div>
+            <div class="card-top">
+              <div class="card-check-wrap">
+                <input
+                  type="checkbox"
+                  class="card-checkbox"
+                  data-action="toggle-repo-select"
+                  data-repo="${fullEsc}"
+                  ${isSel ? 'checked' : ''}
+                  aria-label="Select ${fullEsc}"
+                />
+              </div>
+              <div class="card-identity">
+                <div class="card-title-row">
+                  <span class="card-name" title="${fullEsc}">${nameEsc}</span>
+                </div>
+                <a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="card-handle">${fullEsc} ↗</a>
+                <div class="card-badges">
+                  ${visBadge}
+                  ${forkBadge}
+                  ${archBadge}
+                  ${activityBadge}
+                </div>
+              </div>
+            </div>
+
+            ${descEsc ? `<p class="card-bio" style="margin-top:10px;" title="${descEsc}">${descEsc}</p>` : ''}
+            <div class="card-meta-tags" style="margin-top:8px;">${metaParts.join('')}</div>
+          </div>
+
+          <div class="card-right-group">
+            <div class="card-metrics" style="margin-bottom:10px;">
+              <div class="metric-item">
+                <span class="metric-val">${formatCount(r.stargazersCount)}</span>
+                <span class="metric-lbl">Stars</span>
+              </div>
+              <div class="metric-item">
+                <span class="metric-val">${formatCount(r.forksCount)}</span>
+                <span class="metric-lbl">Forks</span>
+              </div>
+              <div class="metric-item">
+                <span class="metric-val">${formatSizeKb(r.sizeKb)}</span>
+                <span class="metric-lbl">Size</span>
+              </div>
+            </div>
+
+            <div class="card-actions">
+              <a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary">
+                View ↗
+              </a>
+              ${actionButtonHtml}
+            </div>
+          </div>
+        </article>
+      `;
+    })
+    .join('');
+
+  els.cardsGrid.innerHTML = html;
+}
+
+function openDeleteRepoModal(repoFullNames) {
+  if (!isViewingOwnVerifiedAccount()) {
+    updateTokenCreationLinks();
+    els.authModal.classList.remove('hidden');
+    return;
+  }
+  if (!repoFullNames || repoFullNames.length === 0) return;
+
+  state.pendingDeleteRepos = [...repoFullNames];
+  const repoMap = new Map((state.reposData?.repos || []).map((r) => [r.fullName, r]));
+
+  els.deleteRepoModalTitle.textContent = `Permanently Delete ${repoFullNames.length} Repositor${
+    repoFullNames.length === 1 ? 'y' : 'ies'
+  }`;
+  els.deleteRepoModalDesc.textContent = `You are about to permanently delete ${
+    repoFullNames.length
+  } repositor${
+    repoFullNames.length === 1 ? 'y' : 'ies'
+  } from @${state.auth.viewerLogin}. This cannot be undone.`;
+
+  els.deleteRepoPreviewList.innerHTML = repoFullNames
+    .map((fullName) => {
+      const r = repoMap.get(fullName);
+      const vis = r?.isPrivate ? '🔒 Private' : '🌐 Public';
+      const stars = r ? ` · ★${r.stargazersCount}` : '';
+      return `<span class="preview-chip">${escapeHtml(fullName)} (${vis}${stars})</span>`;
+    })
+    .join('');
+
+  els.deleteRepoConfirmInput.value = '';
+  els.confirmDeleteRepoBtn.disabled = true;
+  els.confirmDeleteRepoBtn.textContent = `Permanently Delete ${repoFullNames.length} Repo${
+    repoFullNames.length === 1 ? '' : 's'
+  }`;
+  els.deleteRepoConfirmWrap.classList.remove('hidden');
+  els.deleteRepoProgressWrap.classList.add('hidden');
+  els.deleteRepoModalError.classList.add('hidden');
+  els.deleteRepoModal.classList.remove('hidden');
+  els.deleteRepoConfirmInput.focus();
+}
+
+function closeDeleteRepoModal() {
+  els.deleteRepoModal.classList.add('hidden');
+  state.pendingDeleteRepos = [];
+  els.deleteRepoConfirmInput.value = '';
+}
+
+function showMissingDeleteRepoScopeError() {
+  const isCli = state.runtimeMode === 'local-cli';
+  els.deleteRepoProgressWrap.classList.add('hidden');
+  els.deleteRepoModalError.classList.remove('hidden');
+  els.deleteRepoModalError.innerHTML = isCli
+    ? `<strong>Missing <code>delete_repo</code> permission scope.</strong><br/>
+       Run <code>gh auth refresh -h github.com -s delete_repo</code> in your terminal or open
+       <button type="button" id="inline-repo-auth-btn" class="btn-link">Auth Settings</button> to paste a token with <code>delete_repo</code>.`
+    : `<strong>Token with <code>delete_repo</code> scope required.</strong><br/>
+       Open <button type="button" id="inline-repo-auth-btn" class="btn-link">Auth Settings</button> and use the <strong>Follow + Repo Deletion</strong> token link.`;
+
+  const btn = document.getElementById('inline-repo-auth-btn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      closeDeleteRepoModal();
+      updateTokenCreationLinks();
+      els.authModal.classList.remove('hidden');
+    });
+  }
+  els.confirmDeleteRepoBtn.disabled = false;
+}
+
+async function executePendingRepoDelete() {
+  const repos = [...state.pendingDeleteRepos];
+  if (repos.length === 0) return;
+  if (els.deleteRepoConfirmInput.value.trim() !== 'DELETE') return;
+
+  els.confirmDeleteRepoBtn.disabled = true;
+  els.deleteRepoModalError.classList.add('hidden');
+  els.deleteRepoProgressWrap.classList.remove('hidden');
+  els.deleteRepoProgressBar.style.width = '8%';
+  els.deleteRepoProgressText.textContent = `Deleting ${repos.length} repositories serially...`;
+
+  const deletedSet = new Set();
+
+  if (state.runtimeMode === 'local-cli') {
+    const chunkSize = 5;
+    for (let i = 0; i < repos.length; i += chunkSize) {
+      const batch = repos.slice(i, i + chunkSize);
+      const res = await fetch('/api/repos/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repos: batch }),
+      });
+      const payload = await res.json();
+
+      if (!res.ok) {
+        if (payload.code === 'MISSING_DELETE_REPO_SCOPE' || payload.code === 'NO_TOKEN') {
+          showMissingDeleteRepoScopeError();
+        } else {
+          els.deleteRepoProgressWrap.classList.add('hidden');
+          els.deleteRepoModalError.classList.remove('hidden');
+          els.deleteRepoModalError.textContent = payload.error || 'Failed to delete repositories.';
+          els.confirmDeleteRepoBtn.disabled = false;
+        }
+        return;
+      }
+
+      for (const fullName of payload.succeeded || []) {
+        deletedSet.add(fullName.toLowerCase());
+        state.selectedRepos.delete(fullName);
+      }
+
+      const pct = Math.min(100, Math.round(((i + batch.length) / repos.length) * 100));
+      els.deleteRepoProgressBar.style.width = `${pct}%`;
+      els.deleteRepoProgressText.textContent = `Deleted ${deletedSet.size} of ${repos.length}...`;
+    }
+  } else {
+    const token = getBrowserPat();
+    if (!token) {
+      showMissingDeleteRepoScopeError();
+      return;
+    }
+
+    for (let i = 0; i < repos.length; i++) {
+      const fullName = repos[i];
+      const [owner, repoName] = fullName.split('/');
+      if (i > 0) {
+        await sleep(REPO_DELETE_DELAY_MS);
+      }
+
+      const res = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`,
+        {
+          method: 'DELETE',
+          headers: buildGitHubHeaders(token),
+        }
+      );
+
+      if (res.status === 204) {
+        deletedSet.add(fullName.toLowerCase());
+        state.selectedRepos.delete(fullName);
+      } else {
+        const currentScopes = res.headers.get('x-oauth-scopes') || '';
+        const isFineGrained = token.startsWith('github_pat_');
+        if (
+          !isFineGrained &&
+          (res.status === 403 || res.status === 404) &&
+          !currentScopes.includes('delete_repo')
+        ) {
+          showMissingDeleteRepoScopeError();
+          return;
+        }
+      }
+
+      const pct = Math.min(100, Math.round(((i + 1) / repos.length) * 100));
+      els.deleteRepoProgressBar.style.width = `${pct}%`;
+      els.deleteRepoProgressText.textContent = `Deleted ${deletedSet.size} of ${repos.length}...`;
+    }
+  }
+
+  if (state.reposData?.repos && deletedSet.size > 0) {
+    state.reposData.repos = state.reposData.repos.filter(
+      (r) => !deletedSet.has(r.fullName.toLowerCase())
+    );
+  }
+
+  closeDeleteRepoModal();
+  renderProfileAndStats();
+  renderRepoCards();
+  showToast(
+    `Permanently deleted ${deletedSet.size} repositor${deletedSet.size === 1 ? 'y' : 'ies'}`
+  );
+}
+
+function renderActiveView() {
+  if (state.activeTab === 'repos') {
+    loadAndRenderRepos();
+  } else {
+    renderUserCards();
+  }
+}
+
 function exportCurrentViewCsv() {
+  const escapeCsv = (val) => {
+    const str = String(val ?? '').replace(/\r?\n/g, ' ');
+    if (str.includes(',') || str.includes('"')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  if (state.activeTab === 'repos') {
+    const repos = getFilteredAndSortedRepos();
+    if (repos.length === 0) {
+      showToast('No repositories in current view to export', 'error');
+      return;
+    }
+
+    const headers = [
+      'full_name',
+      'url',
+      'visibility',
+      'is_fork',
+      'is_archived',
+      'language',
+      'stars',
+      'forks',
+      'size_kb',
+      'pushed_at',
+      'description',
+    ];
+    const rows = repos.map((r) =>
+      [
+        r.fullName,
+        r.htmlUrl,
+        r.isPrivate ? 'private' : 'public',
+        r.isFork,
+        r.isArchived,
+        r.language,
+        r.stargazersCount,
+        r.forksCount,
+        r.sizeKb,
+        r.pushedAt || '',
+        r.description,
+      ]
+        .map(escapeCsv)
+        .join(',')
+    );
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `github-repos-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    return;
+  }
+
   const users = getFilteredAndSortedUsers();
   if (users.length === 0) {
     showToast('No users in current view to export', 'error');
@@ -1594,14 +2248,6 @@ function exportCurrentViewCsv() {
     'location',
     'bio',
   ];
-
-  const escapeCsv = (val) => {
-    const str = String(val ?? '').replace(/\r?\n/g, ' ');
-    if (str.includes(',') || str.includes('"')) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
 
   const rows = users.map((u) =>
     [
@@ -1697,8 +2343,9 @@ els.statCards.forEach((card) => {
   card.addEventListener('click', () => {
     state.activeTab = card.dataset.tab;
     state.selectedLogins.clear();
+    state.selectedRepos.clear();
     renderProfileAndStats();
-    renderUserCards();
+    renderActiveView();
   });
 });
 
@@ -1706,8 +2353,9 @@ els.tabBtns.forEach((btn) => {
   btn.addEventListener('click', () => {
     state.activeTab = btn.dataset.tab;
     state.selectedLogins.clear();
+    state.selectedRepos.clear();
     renderProfileAndStats();
-    renderUserCards();
+    renderActiveView();
   });
 });
 
@@ -1719,7 +2367,11 @@ els.showAllowlistedCheckbox.addEventListener('change', (e) => {
 
 els.searchInput.addEventListener('input', (e) => {
   state.searchQuery = e.target.value;
-  renderUserCards();
+  if (state.activeTab === 'repos') {
+    renderRepoCards();
+  } else {
+    renderUserCards();
+  }
 });
 
 els.presetBtns.forEach((btn) => {
@@ -1730,12 +2382,38 @@ els.presetBtns.forEach((btn) => {
   });
 });
 
+els.repoPresetBtns.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    state.repoPreset = btn.dataset.repoPreset;
+    els.repoPresetBtns.forEach((b) => b.classList.toggle('active', b === btn));
+    renderRepoCards();
+  });
+});
+
 els.sortSelect.addEventListener('change', (e) => {
   state.sortBy = e.target.value;
   renderUserCards();
 });
 
+if (els.repoSortSelect) {
+  els.repoSortSelect.addEventListener('change', (e) => {
+    state.repoSortBy = e.target.value;
+    renderRepoCards();
+  });
+}
+
 els.selectAllCheckbox.addEventListener('change', (e) => {
+  if (state.activeTab === 'repos') {
+    const visible = getFilteredAndSortedRepos();
+    if (e.target.checked) {
+      visible.forEach((r) => state.selectedRepos.add(r.fullName));
+    } else {
+      visible.forEach((r) => state.selectedRepos.delete(r.fullName));
+    }
+    renderRepoCards();
+    return;
+  }
+
   const visible = getFilteredAndSortedUsers();
   if (e.target.checked) {
     visible.forEach((u) => state.selectedLogins.add(u.login));
@@ -1746,8 +2424,13 @@ els.selectAllCheckbox.addEventListener('change', (e) => {
 });
 
 els.clearSelectionBtn.addEventListener('click', () => {
-  state.selectedLogins.clear();
-  renderUserCards();
+  if (state.activeTab === 'repos') {
+    state.selectedRepos.clear();
+    renderRepoCards();
+  } else {
+    state.selectedLogins.clear();
+    renderUserCards();
+  }
 });
 
 els.batchAllowlistAddBtn.addEventListener('click', () => {
@@ -1762,15 +2445,53 @@ els.batchUnfollowBtn.addEventListener('click', () => {
   openUnfollowModal([...state.selectedLogins]);
 });
 
+if (els.batchDeleteReposBtn) {
+  els.batchDeleteReposBtn.addEventListener('click', () => {
+    openDeleteRepoModal([...state.selectedRepos]);
+  });
+}
+
 els.cardsGrid.addEventListener('click', (e) => {
   const actionEl = e.target.closest('[data-action]');
   if (!actionEl) return;
   const action = actionEl.dataset.action;
   const login = actionEl.dataset.login;
+  const repo = actionEl.dataset.repo;
 
   if (action === 'prompt-signin') {
     updateTokenCreationLinks();
     els.authModal.classList.remove('hidden');
+    return;
+  }
+
+  if (action === 'toggle-repo-select' && repo) {
+    const isChecked = actionEl.checked;
+    if (e.shiftKey && state.lastClickedRepo && state.lastClickedRepo !== repo) {
+      const visibleRepos = getFilteredAndSortedRepos().map((r) => r.fullName);
+      const startIdx = visibleRepos.indexOf(state.lastClickedRepo);
+      const endIdx = visibleRepos.indexOf(repo);
+      if (startIdx !== -1 && endIdx !== -1) {
+        const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+        for (let i = from; i <= to; i++) {
+          if (isChecked) {
+            state.selectedRepos.add(visibleRepos[i]);
+          } else {
+            state.selectedRepos.delete(visibleRepos[i]);
+          }
+        }
+      }
+    } else if (isChecked) {
+      state.selectedRepos.add(repo);
+    } else {
+      state.selectedRepos.delete(repo);
+    }
+    state.lastClickedRepo = repo;
+    renderRepoCards();
+    return;
+  }
+
+  if (action === 'delete-repo-single' && repo) {
+    openDeleteRepoModal([repo]);
     return;
   }
 
@@ -1814,6 +2535,25 @@ els.cardsGrid.addEventListener('click', (e) => {
 els.closeUnfollowModal.addEventListener('click', closeUnfollowModal);
 els.cancelUnfollowBtn.addEventListener('click', closeUnfollowModal);
 els.confirmUnfollowBtn.addEventListener('click', executePendingUnfollow);
+
+// Delete Repo Modal events
+if (els.closeDeleteRepoModal) {
+  els.closeDeleteRepoModal.addEventListener('click', closeDeleteRepoModal);
+}
+if (els.cancelDeleteRepoBtn) {
+  els.cancelDeleteRepoBtn.addEventListener('click', closeDeleteRepoModal);
+}
+if (els.deleteRepoConfirmInput) {
+  els.deleteRepoConfirmInput.addEventListener('input', (e) => {
+    const valid = e.target.value.trim() === 'DELETE';
+    if (els.confirmDeleteRepoBtn) {
+      els.confirmDeleteRepoBtn.disabled = !valid;
+    }
+  });
+}
+if (els.confirmDeleteRepoBtn) {
+  els.confirmDeleteRepoBtn.addEventListener('click', executePendingRepoDelete);
+}
 
 // Auth Modal events
 els.authBtn.addEventListener('click', async () => {
