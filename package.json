@@ -9,8 +9,10 @@
   "files": [
     "server.mjs",
     "public/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
+  "author": "Roy Otieno (@rauell1)",
   "scripts": {
     "start": "node server.mjs",
     "cf:dev": "npx wrangler dev",

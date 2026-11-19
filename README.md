@@ -63,5 +63,22 @@ npm run cf:deploy
 
 ### Option B: Connect GitHub Repo in Cloudflare Dashboard
 1. Push this repository to GitHub.
-2. In the **Cloudflare Dashboard**, go to **Workers & Pages** → **Create** → **Pages** → **Connect to Git**.
-3. Set **Build output directory** to `public` (also pre-configured in [`wrangler.toml`](file:///D:/Coding/github-housekeeping/wrangler.toml)).
+2. In the **Cloudflare Dashboard**, go to **Workers & Pages** → **Create** → **Connect to Git**.
+3. Leave the default `npx wrangler deploy` command and click **Deploy** (pre-configured in [`wrangler.toml`](file:///D:/Coding/github-housekeeping/wrangler.toml)).
+
+---
+
+## 🤝 Community & Collaboration
+
+Contributions, bug reports, and feature requests are welcome!
+
+- **Contributing Guide**: Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) for local setup and architecture guidelines.
+- **Code of Conduct**: Read [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
+- **Security Policy**: Read [`SECURITY.md`](./SECURITY.md) for details on how tokens are handled and how to report vulnerabilities.
+- **Issues & Ideas**: Open an issue on [GitHub Issues](https://github.com/rauell1/github-housekeeping/issues).
+
+---
+
+## 📄 License
+
+Released under the [MIT License](./LICENSE) — Copyright (c) 2026 Roy Otieno ([@rauell1](https://github.com/rauell1)).

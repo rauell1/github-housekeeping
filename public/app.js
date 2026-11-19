@@ -1,12 +1,12 @@
 const LOCAL_STORAGE_ALLOWLIST_KEY = 'gh_housekeeping_allowlist_v1';
-const LOCAL_STORAGE_THEME_KEY = 'gh_housekeeping_theme_v1';
+const LOCAL_STORAGE_THEME_KEY = 'gh_housekeeping_theme_v2';
 const SESSION_STORAGE_PAT_KEY = 'gh_housekeeping_pat_v1';
 const GITHUB_USERNAME_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 const UNFOLLOW_DELAY_MS = 300;
 
 const state = {
   runtimeMode: 'detecting', // 'local-cli' | 'web-client'
-  theme: 'dark', // 'dark' | 'light'
+  theme: 'light', // 'light' | 'dark'
   auth: null,
   data: null,
   allowlist: {},
@@ -159,15 +159,15 @@ function showToast(message, type = 'success') {
   }, 3600);
 }
 
-// Theme Management (Dark + Light/White Mode)
+// Theme Management (Light Mode by default + Dark Mode toggle)
 function initTheme() {
-  let saved = 'dark';
+  let saved = 'light';
   try {
-    saved = localStorage.getItem(LOCAL_STORAGE_THEME_KEY) || 'dark';
+    saved = localStorage.getItem(LOCAL_STORAGE_THEME_KEY) || 'light';
   } catch {
     // ignore
   }
-  applyTheme(saved === 'light' ? 'light' : 'dark');
+  applyTheme(saved === 'dark' ? 'dark' : 'light');
 }
 
 function applyTheme(theme) {

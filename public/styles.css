@@ -1,33 +1,4 @@
 :root,
-html[data-theme="dark"] {
-  --bg-canvas: #0d1117;
-  --bg-surface: #161b22;
-  --bg-elevated: #1c2128;
-  --bg-hover: #21262d;
-  --border-default: #30363d;
-  --border-muted: #21262d;
-  --text-primary: #e6edf3;
-  --text-secondary: #8b949e;
-  --text-muted: #6e7681;
-  --accent-blue: #2f81f7;
-  --accent-blue-hover: #388bfd;
-  --accent-blue-text: #79c0ff;
-  --accent-green: #238636;
-  --accent-green-bright: #3fb950;
-  --accent-danger: #da3633;
-  --accent-danger-bright: #f85149;
-  --accent-amber: #d29922;
-  --accent-amber-text: #f0b72f;
-  --accent-purple: #a371f7;
-  --accent-purple-text: #d2a8ff;
-  --modal-backdrop: rgba(1, 4, 9, 0.75);
-  --card-hover-border: #484f58;
-  --code-bg: rgba(110, 118, 129, 0.22);
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 12px;
-}
-
 html[data-theme="light"] {
   --bg-canvas: #f6f8fa;
   --bg-surface: #ffffff;
@@ -52,6 +23,35 @@ html[data-theme="light"] {
   --modal-backdrop: rgba(31, 35, 40, 0.5);
   --card-hover-border: #8c959f;
   --code-bg: rgba(175, 184, 193, 0.25);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+}
+
+html[data-theme="dark"] {
+  --bg-canvas: #0d1117;
+  --bg-surface: #161b22;
+  --bg-elevated: #1c2128;
+  --bg-hover: #21262d;
+  --border-default: #30363d;
+  --border-muted: #21262d;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent-blue: #2f81f7;
+  --accent-blue-hover: #388bfd;
+  --accent-blue-text: #79c0ff;
+  --accent-green: #238636;
+  --accent-green-bright: #3fb950;
+  --accent-danger: #da3633;
+  --accent-danger-bright: #f85149;
+  --accent-amber: #d29922;
+  --accent-amber-text: #f0b72f;
+  --accent-purple: #a371f7;
+  --accent-purple-text: #d2a8ff;
+  --modal-backdrop: rgba(1, 4, 9, 0.75);
+  --card-hover-border: #484f58;
+  --code-bg: rgba(110, 118, 129, 0.22);
 }
 
 * {
@@ -1324,4 +1324,39 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* Open Source & Community Footer */
+.app-footer {
+  margin-top: 40px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.app-footer a {
+  color: var(--accent-blue);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.app-footer a:hover {
+  text-decoration: underline;
+}
+
+.footer-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.footer-sep {
+  color: var(--text-muted);
 }
