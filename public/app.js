@@ -118,6 +118,7 @@ const els = {
   batchAllowlistRemoveBtn: document.getElementById('batch-allowlist-remove-btn'),
   batchUnfollowBtn: document.getElementById('batch-unfollow-btn'),
   batchArchiveReposBtn: document.getElementById('batch-archive-repos-btn'),
+  batchUnarchiveReposBtn: document.getElementById('batch-unarchive-repos-btn'),
   batchDeleteReposBtn: document.getElementById('batch-delete-repos-btn'),
 
   welcomeState: document.getElementById('welcome-state'),
@@ -1274,7 +1275,16 @@ function renderProfileAndStats() {
   els.batchAllowlistAddBtn.classList.toggle('hidden', state.activeTab === 'allowlist' || isRepoTab);
   els.batchUnfollowBtn.classList.toggle('hidden', isRepoTab);
   if (els.batchArchiveReposBtn) {
-    els.batchArchiveReposBtn.classList.toggle('hidden', !isRepoTab);
+    els.batchArchiveReposBtn.classList.toggle(
+      'hidden',
+      !isRepoTab || state.repoPreset === 'archived'
+    );
+  }
+  if (els.batchUnarchiveReposBtn) {
+    els.batchUnarchiveReposBtn.classList.toggle(
+      'hidden',
+      !isRepoTab || state.repoPreset !== 'archived'
+    );
   }
   if (els.batchDeleteReposBtn) {
     els.batchDeleteReposBtn.classList.toggle('hidden', !isRepoTab);
@@ -2017,7 +2027,12 @@ function updateRepoSelectionToolbar(visibleRepos) {
 
   const isOwner = isViewingOwnVerifiedAccount();
   if (els.batchArchiveReposBtn) {
+    els.batchArchiveReposBtn.classList.toggle('hidden', state.repoPreset === 'archived');
     els.batchArchiveReposBtn.disabled = selectedCount === 0 || !isOwner;
+  }
+  if (els.batchUnarchiveReposBtn) {
+    els.batchUnarchiveReposBtn.classList.toggle('hidden', state.repoPreset !== 'archived');
+    els.batchUnarchiveReposBtn.disabled = selectedCount === 0 || !isOwner;
   }
   if (els.batchDeleteReposBtn) {
     els.batchDeleteReposBtn.disabled = selectedCount === 0 || !isOwner;
@@ -2782,6 +2797,12 @@ els.batchUnfollowBtn.addEventListener('click', () => {
 if (els.batchArchiveReposBtn) {
   els.batchArchiveReposBtn.addEventListener('click', () => {
     archiveRepos([...state.selectedRepos], true);
+  });
+}
+
+if (els.batchUnarchiveReposBtn) {
+  els.batchUnarchiveReposBtn.addEventListener('click', () => {
+    archiveRepos([...state.selectedRepos], false);
   });
 }
 
