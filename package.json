@@ -25,5 +25,13 @@
     "gh-cli",
     "dashboard"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rauell1/github-housekeeping.git"
+  },
+  "homepage": "https://github.com/rauell1/github-housekeeping#readme",
+  "bugs": {
+    "url": "https://github.com/rauell1/github-housekeeping/issues"
+  },
   "license": "MIT"
 }

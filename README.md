@@ -24,9 +24,13 @@ Designed as a **Dual-Mode Hybrid Tool** so users can pick the workflow that fits
 
 ## 💻 Using Mode 2: Local CLI (`npx` / `gh` CLI)
 
-Run directly with Node.js (v18+):
+Run directly from GitHub or npm with Node.js (v18+):
 
 ```bash
+# Run directly from GitHub (works right now!)
+npx github:rauell1/github-housekeeping --open
+
+# Or if published to npm:
 npx github-housekeeping --open
 ```
 
