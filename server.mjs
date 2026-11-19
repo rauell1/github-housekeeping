@@ -863,6 +863,11 @@ const server = http.createServer(async (req, res) => {
         } else {
           const currentScopes = patchRes.headers.get('x-oauth-scopes') || '';
           const errBody = await patchRes.json().catch(() => ({}));
+          const msg = String(errBody.message || '');
+          if (archived && patchRes.status === 403 && msg.toLowerCase().includes('archived')) {
+            results.push({ fullName, ok: true, archived: true, alreadyArchived: true });
+            continue;
+          }
           const isFineGrained = token.startsWith('github_pat_');
           if (!isFineGrained && (patchRes.status === 403 || patchRes.status === 404) && !currentScopes.includes('repo')) {
             return sendJson(res, 403, {

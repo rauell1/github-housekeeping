@@ -2381,12 +2381,28 @@ async function archiveRepos(repoFullNames, archived = true) {
   }
   if (!repoFullNames || repoFullNames.length === 0) return;
 
+  // Skip repos that are already in the target archived state
+  const repoMap = new Map((state.reposData?.repos || []).map((r) => [r.fullName.toLowerCase(), r]));
+  const targets = repoFullNames.filter((name) => {
+    const r = repoMap.get(name.toLowerCase());
+    return !r || Boolean(r.isArchived) !== Boolean(archived);
+  });
+
+  if (targets.length === 0) {
+    showToast(
+      archived
+        ? 'All selected repositories are already archived'
+        : 'All selected repositories are already active'
+    );
+    return;
+  }
+
   const updatedSet = new Set();
   if (state.runtimeMode === 'local-cli') {
     const res = await fetch('/api/repos/archive', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repos: repoFullNames, archived }),
+      body: JSON.stringify({ repos: targets, archived }),
     });
     const payload = await res.json();
     if (!res.ok) {
@@ -2408,8 +2424,8 @@ async function archiveRepos(repoFullNames, archived = true) {
       els.authModal.classList.remove('hidden');
       return;
     }
-    for (let i = 0; i < repoFullNames.length; i++) {
-      const fullName = repoFullNames[i];
+    for (let i = 0; i < targets.length; i++) {
+      const fullName = targets[i];
       const [owner, repoName] = fullName.split('/');
       if (i > 0) await sleep(REPO_DELETE_DELAY_MS);
       const res = await fetch(
@@ -2429,14 +2445,20 @@ async function archiveRepos(repoFullNames, archived = true) {
       } else {
         const currentScopes = res.headers.get('x-oauth-scopes') || '';
         const errBody = await res.json().catch(() => ({}));
+        const msg = String(errBody.message || '');
+        if (archived && res.status === 403 && msg.toLowerCase().includes('archived')) {
+          updatedSet.add(fullName.toLowerCase());
+          state.selectedRepos.delete(fullName);
+          continue;
+        }
         const isFineGrained = token.startsWith('github_pat_');
         if (!isFineGrained && (res.status === 403 || res.status === 404) && !currentScopes.includes('repo')) {
-          showToast('Your token is missing the "repo" scope. Use the Follow + Repo Deletion link in Auth Settings.', 'error');
+          showToast('Your token is missing the "repo" scope. Use the Full Housekeeping link in Auth Settings.', 'error');
           updateTokenCreationLinks();
           els.authModal.classList.remove('hidden');
           return;
         }
-        showToast(errBody.message || `Could not archive ${fullName} (HTTP ${res.status})`, 'error');
+        showToast(msg || `Could not archive ${fullName} (HTTP ${res.status})`, 'error');
         return;
       }
     }
