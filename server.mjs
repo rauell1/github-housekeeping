@@ -13,7 +13,7 @@ const __dirname = path.dirname(__filename);
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`
-GitHub Follow Housekeeping — Local CLI Mode
+GitHub Follow Housekeeping (Local CLI Mode)
 
 Usage:
   npx github-housekeeping [options]

@@ -155,7 +155,7 @@ function escapeHtml(value) {
 }
 
 function formatCount(num) {
-  if (num === null || num === undefined) return '—';
+  if (num === null || num === undefined) return '-';
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
   if (num >= 1_000) return `${(num / 1_000).toFixed(1)}k`;
   return num.toLocaleString();

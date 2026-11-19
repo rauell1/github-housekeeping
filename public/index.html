@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GitHub Follow Housekeeping — Audit Non-Followers &amp; Curate Your Allowlist</title>
+  <title>GitHub Follow Housekeeping | Audit Non-Followers &amp; Curate Your Allowlist</title>
   <meta name="description" content="Audit your GitHub following list, see who doesn't follow you back, curate a protected allowlist, and batch unfollow. Runs 100% in your browser or via npx CLI." />
   <meta property="og:title" content="GitHub Follow Housekeeping" />
   <meta property="og:description" content="Audit GitHub non-followers, curate a protected allowlist, and batch unfollow safely. Zero-backend privacy." />
@@ -105,7 +105,7 @@
       </div>
 
       <div class="compliance-note">
-        <strong>🛡 Ownership &amp; GitHub Rules Compliance:</strong> Anyone's followers/following lists are public on GitHub, so public scanning is read-only. However, <strong>unfollowing is strictly locked to the verified token owner's account</strong>—you can never modify another user's account. Unfollow requests are paced serially (300ms apart) to respect GitHub rate limits.
+        <strong>🛡 Ownership &amp; GitHub Rules Compliance:</strong> Anyone's followers/following lists are public on GitHub, so public scanning is read-only. However, <strong>unfollowing is strictly locked to the verified token owner's account</strong>, so you can never modify another user's account. Unfollow requests are paced serially (300ms apart) to respect GitHub rate limits.
       </div>
     </section>
 
@@ -143,8 +143,8 @@
           <img id="profile-avatar" class="profile-avatar" src="" alt="" />
           <div>
             <div class="profile-title-row">
-              <h2 id="profile-name">—</h2>
-              <a id="profile-link" href="#" target="_blank" rel="noopener noreferrer" class="profile-handle">@— ↗</a>
+              <h2 id="profile-name">-</h2>
+              <a id="profile-link" href="#" target="_blank" rel="noopener noreferrer" class="profile-handle">@- ↗</a>
               <span id="scan-mode-chip" class="scan-chip"></span>
               <span id="ownership-chip" class="scan-chip"></span>
             </div>
@@ -391,11 +391,11 @@
       </div>
       <div class="modal-body">
         <div class="auth-status-card">
-          <div><strong>Runtime Mode:</strong> <span id="modal-runtime-mode">—</span></div>
-          <div><strong>Auth Source:</strong> <span id="modal-auth-source">—</span></div>
-          <div><strong>Verified Account Owner:</strong> <span id="modal-auth-user">—</span></div>
-          <div><strong>Detected Scopes:</strong> <code id="modal-auth-scopes">—</code></div>
-          <div><strong>Unfollow Permission (<code>user:follow</code>):</strong> <span id="modal-follow-perm">—</span></div>
+          <div><strong>Runtime Mode:</strong> <span id="modal-runtime-mode">-</span></div>
+          <div><strong>Auth Source:</strong> <span id="modal-auth-source">-</span></div>
+          <div><strong>Verified Account Owner:</strong> <span id="modal-auth-user">-</span></div>
+          <div><strong>Detected Scopes:</strong> <code id="modal-auth-scopes">-</code></div>
+          <div><strong>Unfollow Permission (<code>user:follow</code>):</strong> <span id="modal-follow-perm">-</span></div>
         </div>
 
         <!-- Step-by-step non-technical guide -->
@@ -431,7 +431,7 @@
         <div class="auth-instructions">
           <h4 id="modal-pat-heading">Paste Your GitHub Token</h4>
           <p id="modal-pat-desc">
-            Kept strictly in your browser's temporary session memory—never stored on any external server.
+            Kept strictly in your browser's temporary session memory and never stored on any external server.
           </p>
           <input
             type="password"

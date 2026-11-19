@@ -1,48 +1,81 @@
 # GitHub Follow Housekeeping
 
-Audit your GitHub following list, see who isn't following you back, curate a protected **Allowlist / Ignore List**, and batch unfollow accounts.
+A lightweight, zero-dependency tool to audit your GitHub following list, identify accounts that do not follow you back, curate a protected **Allowlist (Ignore List)**, and perform safe batch unfollowing.
 
-Designed as a **Dual-Mode Hybrid Tool** so users can pick the workflow that fits them best:
+Built as a **Dual-Mode Hybrid Application** so both non-technical browser users and command-line developers can use the workflow that fits their environment.
 
-| Feature | 🌐 Mode 1: Web App (Cloudflare Pages) | 💻 Mode 2: Local CLI (`npx github-housekeeping`) |
+---
+
+## What This Tool Does
+
+1. **Audits Follow Reciprocity**
+   - Scans any GitHub account and categorizes connections into four views:
+     - **Not Following Back (Actionable)**: Accounts you follow that do not follow you back, excluding your protected allowlist.
+     - **Allowlist / Ignored (Protected)**: Accounts you want to keep following even if they do not follow back (such as open-source maintainers, mentors, and organizations).
+     - **Mutuals**: Accounts where both users follow each other.
+     - **Followers You Don't Follow**: Accounts that follow you whom you have not followed back.
+2. **Smart Housekeeping & 2026 Realtime Insights**
+   - **Realtime Snapshot Diff**: Compares your current followers against your previous scan locally in your browser and highlights who unfollowed you (`- @username`) or newly followed you (`+ @username`) since your last visit.
+   - **1-Click Auto-Shield Creators (>= 1k Followers)**: Automatically detects high-follower creators and maintainers in your non-followers list and moves them to your protected Allowlist in one click.
+   - **Dormancy & Activity Detection**: Displays when each account was last active on GitHub and lets you filter or sort by **Dormant (> 1 year inactive)** or **0 Public Repositories**.
+   - **Grid & High-Density Compact Views**: Switch between visual profile cards and a compact table list, with **Light Mode** (default) and **Dark Mode** themes, `/` search shortcut, and `Shift + Click` range selection.
+   - **CSV & JSON Portability**: Export any filtered view to CSV, or export and import your Allowlist as JSON.
+3. **1-Click Pre-Filled Token Helper for Non-Technical Users**
+   - Includes a direct link to GitHub's token creation page with the token description and the minimum required `user:follow` permission checkbox pre-selected, alongside a 3-step visual guide.
+
+---
+
+## Dual-Mode Architecture: Web App vs. Local CLI
+
+| Capability | 🌐 Mode 1: Web App (Cloudflare) | 💻 Mode 2: Local CLI (`npx` / `gh` CLI) |
 | :--- | :--- | :--- |
-| **Best For** | Instant browser checks with zero installation | Developers who already use the GitHub CLI (`gh`) |
-| **How to Launch** | Open the hosted Cloudflare URL | Run `npx github-housekeeping --open` |
-| **Authentication** | Public lookup (no token) or Browser-Only PAT (`sessionStorage`) | Automatic via local `gh auth` session (or local PAT) |
-| **Allowlist Storage** | Browser `localStorage` (+ JSON Export/Import) | Local disk (`~/.github-housekeeping/allowlist.json`) |
-| **Privacy** | 100% client-direct to `api.github.com` (no backend server sees your token) | 100% local (`127.0.0.1:3847`) |
+| **Target Audience** | External users and teams wanting instant browser access with zero installation | Developers and engineers who already use the official GitHub CLI (`gh`) |
+| **How to Launch** | Open the hosted Cloudflare URL in any browser | Run `npx github:rauell1/github-housekeeping --open` |
+| **Public Read-Only Scan** | Enter any `@username` (queries `api.github.com` directly from the visitor's browser) | Enter any `@username` or auto-detect the signed-in `gh` account |
+| **Authenticated Scan & Unfollow** | Browser-only Personal Access Token stored in tab `sessionStorage` | Uses your local `gh auth` session automatically (or an optional local token) |
+| **Allowlist Persistence** | Browser `localStorage` + JSON Export/Import | Local disk (`~/.github-housekeeping/allowlist.json` or `./data/allowlist.json`) |
+| **Network Path** | Direct Browser -> `https://api.github.com` | Browser -> Localhost (`127.0.0.1:3847`) -> `https://api.github.com` |
 
 ---
 
-## 🛡 GitHub Rules & API Compliance
+## Corporate, Enterprise & Security Readiness
 
-- **Official APIs Only**: Uses documented GitHub REST (`GET /users/{username}/following`, `DELETE /user/following/{username}`) and GraphQL APIs.
-- **No Follow-Churn or Spam Automation**: GitHub's Acceptable Use Policies prohibit automated mass-following / follow-for-follow churn bots. This tool **never** auto-follows accounts or runs background bots—it only performs user-initiated, manually confirmed housekeeping on your existing following list.
-- **Secondary Rate-Limit Pacing**: Unfollow (`DELETE`) requests are executed **serially** (one at a time) with a `300ms` delay between requests in accordance with GitHub's secondary rate-limit best practices.
+This project is designed to pass strict corporate and open-source security reviews:
+
+- **Zero Supply-Chain Dependencies**: `package.json` has zero runtime npm dependencies (`dependencies` is empty). The local server uses native Node.js modules (`node:http`, `node:fs`, `node:child_process`, native `fetch`), and the frontend uses pure HTML, CSS, and ES Modules.
+- **Principle of Least Privilege (`user:follow` only)**: Unlike third-party OAuth apps that request broad `repo` or `user` permissions, this tool only requires the `user:follow` scope. It cannot read private repositories, code, or organization secrets.
+- **Zero Backend Token or Data Storage**:
+  - In **Web App Mode**, tokens are held exclusively in the user's browser `sessionStorage` and sent directly to `https://api.github.com`. No Cloudflare Worker or external database ever receives or logs user tokens.
+  - Strict `Content-Security-Policy` headers in [`public/_headers`](./public/_headers) restrict network connections (`connect-src`) exclusively to `'self'` and `https://api.github.com`.
+- **Strict Ownership Enforcement**: Unfollow actions are locked in the UI and API unless the authenticated token owner matches the scanned profile (`viewerLogin === profile.login`).
+- **GitHub API & Acceptable Use Compliance**:
+  - Contains no auto-follow, mass-follow, or follow-churn automation.
+  - Executes all `DELETE /user/following/{username}` mutations serially with a `300ms` delay between requests to respect GitHub's secondary rate limits.
 
 ---
 
-## 💻 Using Mode 2: Local CLI (`npx` / `gh` CLI)
+## Quick Start
 
-Run directly from GitHub or npm with Node.js (v18+):
+### 1. Run Locally via `npx` (No Clone Required)
+
+Requires Node.js v18 or newer:
 
 ```bash
-# Run directly from GitHub (works right now!)
 npx github:rauell1/github-housekeeping --open
-
-# Or if published to npm:
-npx github-housekeeping --open
 ```
 
-Or inside this repository:
+### 2. Clone and Run from Source
 
 ```bash
-cd D:\Coding\github-housekeeping
+git clone https://github.com/rauell1/github-housekeeping.git
+cd github-housekeeping
 npm start
 ```
 
-### Enabling 1-Click Unfollow in `gh` CLI
-By default, `gh auth login` grants read access for scanning. To allow 1-click unfollowing via your local `gh` CLI session, run once:
+Then open **http://127.0.0.1:3847** in your browser.
+
+#### Enabling Unfollow Permission in GitHub CLI (`gh`)
+If you use the local `gh` CLI and want to unfollow directly from the dashboard, grant the `user:follow` scope to your local session once:
 
 ```bash
 gh auth refresh -h github.com -s user:follow
@@ -50,35 +83,42 @@ gh auth refresh -h github.com -s user:follow
 
 ---
 
-## 🌐 Deploying Mode 1: Cloudflare Pages
+## Self-Hosting on Cloudflare
 
-Because `public/` is self-contained and talks directly to `https://api.github.com` from the visitor's browser when no local CLI server is present, you can deploy it directly to **Cloudflare Pages**:
+The project is pre-configured in [`wrangler.toml`](./wrangler.toml) to deploy `./public` as Cloudflare Workers Static Assets:
 
-### Option A: Deploy via Wrangler CLI
 ```bash
-cd D:\Coding\github-housekeeping
+# Test locally with Wrangler
+npm run cf:dev
+
+# Deploy to Cloudflare
 npm run cf:deploy
 ```
-*(Or test locally with Wrangler using `npm run cf:dev`.)*
 
-### Option B: Connect GitHub Repo in Cloudflare Dashboard
-1. Push this repository to GitHub.
-2. In the **Cloudflare Dashboard**, go to **Workers & Pages** → **Create** → **Connect to Git**.
-3. Leave the default `npx wrangler deploy` command and click **Deploy** (pre-configured in [`wrangler.toml`](file:///D:/Coding/github-housekeeping/wrangler.toml)).
+Or connect your fork in the **Cloudflare Dashboard** under **Workers & Pages -> Create -> Connect to Git** using the default `npx wrangler deploy` command.
 
 ---
 
-## 🤝 Community & Collaboration
+## Project Structure
 
-Contributions, bug reports, and feature requests are welcome!
-
-- **Contributing Guide**: Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) for local setup and architecture guidelines.
-- **Code of Conduct**: Read [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
-- **Security Policy**: Read [`SECURITY.md`](./SECURITY.md) for details on how tokens are handled and how to report vulnerabilities.
-- **Issues & Ideas**: Open an issue on [GitHub Issues](https://github.com/rauell1/github-housekeeping/issues).
+- [`server.mjs`](./server.mjs): Zero-dependency local Node.js CLI server (`127.0.0.1:3847`), `gh` CLI token bridge, GraphQL/REST analyzer, disk allowlist manager, and rate-limited unfollow endpoint.
+- [`public/index.html`](./public/index.html): Dashboard layout, mode comparison guide, 3-step token creator modal, and unfollow confirmation dialog.
+- [`public/styles.css`](./public/styles.css): Responsive Light Mode (default) and Dark Mode theme variables, sticky toolbar, card grid, and compact list view styles.
+- [`public/app.js`](./public/app.js): Dual-mode runtime engine (`local-cli` and `web-client`), realtime follower snapshot diffing, filtering, sorting, batch selection, and CSV/JSON export.
+- [`public/_headers`](./public/_headers): Production HTTP security headers (`Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`).
+- [`wrangler.toml`](./wrangler.toml): Cloudflare deployment configuration.
 
 ---
 
-## 📄 License
+## Community & Collaboration
 
-Released under the [MIT License](./LICENSE) — Copyright (c) 2026 Roy Otieno ([@rauell1](https://github.com/rauell1)).
+- **Contributing Guide**: See [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+- **Code of Conduct**: See [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
+- **Security Policy**: See [`SECURITY.md`](./SECURITY.md)
+- **Issues & Feature Requests**: Open a ticket on [GitHub Issues](https://github.com/rauell1/github-housekeeping/issues)
+
+---
+
+## License
+
+Released under the [MIT License](./LICENSE). Copyright (c) 2026 Roy Otieno ([@rauell1](https://github.com/rauell1)).
