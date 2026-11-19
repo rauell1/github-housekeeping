@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GitHub Follow Housekeeping</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Navigation Header -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="22" height="22" fill="currentColor">
+            <path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title-row">
+            <h1>GitHub Follow Housekeeping</h1>
+            <button type="button" id="mode-badge-btn" class="mode-badge" title="Click to compare Web Mode vs Local CLI Mode">
+              Detecting mode...
+            </button>
+          </div>
+          <p class="subtitle">Audit non-followers, curate your allowlist, and batch unfollow</p>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <form id="scan-form" class="scan-form">
+          <label for="username-input" class="sr-only">GitHub Username</label>
+          <span class="input-prefix">@</span>
+          <input
+            id="username-input"
+            type="text"
+            placeholder="github-username"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+          <button type="submit" id="scan-btn" class="btn btn-primary">
+            Scan Account
+          </button>
+        </form>
+
+        <button type="button" id="guide-btn" class="btn btn-secondary btn-sm">
+          Modes &amp; Guide
+        </button>
+
+        <button type="button" id="auth-btn" class="auth-pill" title="Click to configure GitHub authentication & scopes">
+          <span id="auth-dot" class="status-dot"></span>
+          <span id="auth-label">Checking auth...</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Mode Comparison Strip (collapsible / shown on demand or when unauthenticated) -->
+    <section id="modes-explainer" class="modes-explainer hidden">
+      <div class="modes-header">
+        <div>
+          <h3>Choose How You Want to Use GitHub Follow Housekeeping</h3>
+          <p>This tool works both as an instant browser web app (hosted on Cloudflare) and as a local CLI tool.</p>
+        </div>
+        <button type="button" id="close-modes-explainer" class="icon-close" aria-label="Dismiss">&times;</button>
+      </div>
+
+      <div class="modes-cards">
+        <div id="mode-card-web" class="mode-card">
+          <div class="mode-card-header">
+            <span class="mode-tag mode-tag-web">🌐 Web App Mode (Cloudflare)</span>
+            <span id="web-active-pill" class="active-mode-pill hidden">Current Mode</span>
+          </div>
+          <p class="mode-desc">Zero installation. Runs 100% inside your browser and talks directly to <code>api.github.com</code>.</p>
+          <ul class="mode-list">
+            <li><strong>Public Audit (No Token):</strong> Type any <code>@username</code> above to check non-followers, mutuals, and fans.</li>
+            <li><strong>Full Housekeeping (Browser Token):</strong> Click <strong>Auth Settings</strong> to paste a token with <code>user:follow</code> scope. Kept in your browser session only—never sent to any backend server.</li>
+            <li><strong>Allowlist Storage:</strong> Saved in your browser's <code>localStorage</code> (with JSON export/import).</li>
+          </ul>
+        </div>
+
+        <div id="mode-card-cli" class="mode-card">
+          <div class="mode-card-header">
+            <span class="mode-tag mode-tag-cli">💻 Local CLI Mode (npx / gh CLI)</span>
+            <span id="cli-active-pill" class="active-mode-pill hidden">Current Mode</span>
+          </div>
+          <p class="mode-desc">Best for developers who already have the official GitHub CLI (<code>gh</code>) installed locally.</p>
+          <ul class="mode-list">
+            <li><strong>Run Locally:</strong> <code>npx github-housekeeping --open</code></li>
+            <li><strong>Zero PAT Setup:</strong> Automatically reuses your local <code>gh auth</code> login. Run <code>gh auth refresh -h github.com -s user:follow</code> to enable 1-click unfollow.</li>
+            <li><strong>Allowlist Storage:</strong> Persisted directly to disk (<code>~/.github-housekeeping/allowlist.json</code>).</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="compliance-note">
+        <strong>🛡 GitHub Rules &amp; Rate-Limit Compliance:</strong> This tool only performs manual, user-confirmed housekeeping using official GitHub REST &amp; GraphQL APIs. It never auto-follows or performs follow-churn automation, and serializes unfollow requests with a 300ms delay to respect GitHub's secondary rate limits.
+      </div>
+    </section>
+
+    <!-- Scope Warning Banner -->
+    <div id="scope-banner" class="scope-banner hidden">
+      <div class="scope-banner-content">
+        <span id="scope-badge-label" class="scope-badge">Read-Only Mode</span>
+        <span id="scope-banner-text">
+          You can scan any account and curate your allowlist. To enable 1-click unfollowing, grant the <code>user:follow</code> scope.
+        </span>
+      </div>
+      <div class="scope-banner-actions">
+        <button type="button" id="copy-gh-cmd-btn" class="btn btn-sm btn-secondary">
+          Copy gh CLI Command
+        </button>
+        <button type="button" id="open-auth-modal-btn" class="btn btn-sm btn-secondary">
+          Auth Settings
+        </button>
+      </div>
+    </div>
+
+    <!-- Profile & Summary Metrics -->
+    <section id="summary-section" class="summary-section hidden">
+      <div class="profile-strip">
+        <div class="profile-identity">
+          <img id="profile-avatar" class="profile-avatar" src="" alt="" />
+          <div>
+            <div class="profile-title-row">
+              <h2 id="profile-name">—</h2>
+              <a id="profile-link" href="#" target="_blank" rel="noopener noreferrer" class="profile-handle">@— ↗</a>
+              <span id="scan-mode-chip" class="scan-chip"></span>
+            </div>
+            <p id="profile-bio" class="profile-bio"></p>
+          </div>
+        </div>
+        <div class="profile-tools">
+          <button type="button" id="export-csv-btn" class="btn btn-secondary btn-sm">
+            Export View (CSV)
+          </button>
+          <button type="button" id="export-allowlist-btn" class="btn btn-secondary btn-sm">
+            Export Allowlist (JSON)
+          </button>
+          <label class="btn btn-secondary btn-sm file-btn">
+            Import Allowlist
+            <input type="file" id="import-allowlist-input" accept="application/json" hidden />
+          </label>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <button type="button" class="stat-card stat-card-danger active" data-tab="non-followers">
+          <div class="stat-label">Not Following Back (Actionable)</div>
+          <div id="stat-actionable" class="stat-value">0</div>
+          <div id="stat-nonfollowers-total" class="stat-meta">0 total non-followers</div>
+        </button>
+
+        <button type="button" class="stat-card stat-card-shield" data-tab="allowlist">
+          <div class="stat-label">Allowlisted (Protected)</div>
+          <div id="stat-allowlisted" class="stat-value">0</div>
+          <div id="stat-allowlist-storage" class="stat-meta">Kept during housekeeping</div>
+        </button>
+
+        <button type="button" class="stat-card stat-card-success" data-tab="mutuals">
+          <div class="stat-label">Mutual Follows</div>
+          <div id="stat-mutuals" class="stat-value">0</div>
+          <div id="stat-reciprocity" class="stat-meta">0% reciprocity rate</div>
+        </button>
+
+        <button type="button" class="stat-card stat-card-info" data-tab="fans">
+          <div class="stat-label">Followers Not Followed Back</div>
+          <div id="stat-fans" class="stat-value">0</div>
+          <div id="stat-totals" class="stat-meta">0 Following · 0 Followers</div>
+        </button>
+      </div>
+    </section>
+
+    <!-- Main Controls & Filter Bar -->
+    <section id="controls-section" class="controls-section hidden">
+      <div class="tabs-row">
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab-btn active" data-tab="non-followers">
+            Not Following Back <span id="tab-count-non-followers" class="tab-badge">0</span>
+          </button>
+          <button type="button" class="tab-btn" data-tab="allowlist">
+            Allowlist / Ignored <span id="tab-count-allowlist" class="tab-badge">0</span>
+          </button>
+          <button type="button" class="tab-btn" data-tab="mutuals">
+            Mutuals <span id="tab-count-mutuals" class="tab-badge">0</span>
+          </button>
+          <button type="button" class="tab-btn" data-tab="fans">
+            Followers You Don't Follow <span id="tab-count-fans" class="tab-badge">0</span>
+          </button>
+        </div>
+
+        <label id="include-allowlisted-wrap" class="toggle-inline">
+          <input type="checkbox" id="show-allowlisted-in-nonfollowers" />
+          <span>Show allowlisted in this view</span>
+        </label>
+      </div>
+
+      <div class="filters-row">
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 16 16" width="15" height="15" fill="currentColor">
+            <path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path>
+          </svg>
+          <input
+            type="search"
+            id="search-input"
+            placeholder="Filter by username, name, bio, company, or location..."
+          />
+        </div>
+
+        <div class="preset-pills" role="group" aria-label="Quick filters">
+          <button type="button" class="pill-btn active" data-preset="all">All</button>
+          <button type="button" class="pill-btn" data-preset="popular" title="Accounts with 1,000+ followers (requires token/GraphQL scan)">
+            Popular (&ge;1k followers)
+          </button>
+          <button type="button" class="pill-btn" data-preset="regular" title="Accounts with under 1,000 followers">
+            Under 1k followers
+          </button>
+          <button type="button" class="pill-btn" data-preset="zero-repos" title="Accounts with 0 public repositories">
+            0 Public Repos
+          </button>
+        </div>
+
+        <div class="sort-box">
+          <label for="sort-select">Sort:</label>
+          <select id="sort-select">
+            <option value="order-asc">Follow Order (Oldest first)</option>
+            <option value="order-desc">Follow Order (Newest first)</option>
+            <option value="followers-desc">Followers (High &rarr; Low)</option>
+            <option value="followers-asc">Followers (Low &rarr; High)</option>
+            <option value="repos-asc">Public Repos (Low &rarr; High)</option>
+            <option value="login-asc">Username (A &rarr; Z)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Batch Selection & Action Toolbar -->
+      <div class="batch-bar">
+        <div class="batch-left">
+          <label class="select-all-label">
+            <input type="checkbox" id="select-all-checkbox" />
+            <span id="selection-summary">Select All Visible (0)</span>
+          </label>
+          <button type="button" id="clear-selection-btn" class="btn-link hidden">
+            Clear selection
+          </button>
+        </div>
+
+        <div class="batch-actions">
+          <button type="button" id="batch-allowlist-add-btn" class="btn btn-sm btn-shield" disabled>
+            Keep / Add to Allowlist (<span class="sel-count">0</span>)
+          </button>
+          <button type="button" id="batch-allowlist-remove-btn" class="btn btn-sm btn-secondary hidden" disabled>
+            Remove from Allowlist (<span class="sel-count">0</span>)
+          </button>
+          <button type="button" id="batch-unfollow-btn" class="btn btn-sm btn-danger" disabled>
+            Unfollow Selected (<span class="sel-count">0</span>)
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Loading / Welcome / Error / Empty States & Cards Grid -->
+    <main class="main-content">
+      <div id="welcome-state" class="state-box hidden">
+        <h3>Enter a GitHub username to begin</h3>
+        <p>Type any GitHub handle in the <code>@username</code> box above and click <strong>Scan Account</strong>, or sign in via <strong>Auth Settings</strong>.</p>
+      </div>
+
+      <div id="loading-state" class="state-box hidden">
+        <div class="spinner"></div>
+        <p id="loading-text">Scanning GitHub following &amp; followers...</p>
+      </div>
+
+      <div id="error-state" class="state-box error-box hidden">
+        <h3>Could not complete scan</h3>
+        <p id="error-message"></p>
+      </div>
+
+      <div id="empty-state" class="state-box hidden">
+        <h3 id="empty-title">No users match this view</h3>
+        <p id="empty-subtitle">Try adjusting your search or filter settings.</p>
+      </div>
+
+      <div id="cards-grid" class="cards-grid"></div>
+    </main>
+  </div>
+
+  <!-- Confirmation Modal for Unfollow -->
+  <div id="unfollow-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="unfollow-modal-title">Confirm Unfollow</h3>
+        <button type="button" id="close-unfollow-modal" class="icon-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="unfollow-modal-desc">
+          You are about to unfollow the following GitHub users. Users on your allowlist are automatically protected.
+        </p>
+        <div id="unfollow-preview-list" class="preview-chip-list"></div>
+        <div id="unfollow-progress-wrap" class="progress-wrap hidden">
+          <div class="progress-bar-bg">
+            <div id="unfollow-progress-bar" class="progress-bar-fill"></div>
+          </div>
+          <p id="unfollow-progress-text" class="progress-text">Processing serially (300ms pacing)...</p>
+        </div>
+        <div id="unfollow-modal-error" class="modal-error hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="cancel-unfollow-btn" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="confirm-unfollow-btn" class="btn btn-danger">
+          Confirm Unfollow
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Auth & Scope Configuration Modal -->
+  <div id="auth-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>GitHub Authentication &amp; Mode Settings</h3>
+        <button type="button" id="close-auth-modal" class="icon-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="auth-status-card">
+          <div><strong>Runtime Mode:</strong> <span id="modal-runtime-mode">—</span></div>
+          <div><strong>Auth Source:</strong> <span id="modal-auth-source">—</span></div>
+          <div><strong>Authenticated User:</strong> <span id="modal-auth-user">—</span></div>
+          <div><strong>Detected Scopes:</strong> <code id="modal-auth-scopes">—</code></div>
+          <div><strong>Unfollow Permission (<code>user:follow</code>):</strong> <span id="modal-follow-perm">—</span></div>
+        </div>
+
+        <div id="modal-gh-cli-section" class="auth-instructions">
+          <h4>Option A (Local CLI Mode): Use GitHub CLI (<code>gh</code>)</h4>
+          <p>When running locally via <code>npx github-housekeeping</code>, grant <code>user:follow</code> to your local <code>gh</code> session:</p>
+          <div class="code-copy-row">
+            <code>gh auth refresh -h github.com -s user:follow</code>
+            <button type="button" id="modal-copy-gh-btn" class="btn btn-sm btn-secondary">Copy</button>
+          </div>
+        </div>
+
+        <div class="auth-instructions">
+          <h4 id="modal-pat-heading">Option B: Personal Access Token (PAT)</h4>
+          <p id="modal-pat-desc">
+            Paste a GitHub token with the <code>user:follow</code> scope to enable rich GraphQL profile metrics and 1-click batch unfollowing.
+          </p>
+          <input
+            type="password"
+            id="custom-pat-input"
+            class="full-input"
+            placeholder="ghp_... or github_pat_..."
+            autocomplete="off"
+          />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="clear-pat-btn" class="btn btn-secondary">Clear Custom Token</button>
+        <button type="button" id="save-pat-btn" class="btn btn-primary">Save &amp; Verify Token</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

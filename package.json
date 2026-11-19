@@ -1,0 +1,29 @@
+{
+  "name": "github-housekeeping",
+  "version": "1.1.0",
+  "description": "Audit GitHub non-followers, curate a protected allowlist, and batch unfollow. Runs as a Cloudflare Pages web app or local CLI via npx.",
+  "type": "module",
+  "bin": {
+    "github-housekeeping": "./server.mjs"
+  },
+  "files": [
+    "server.mjs",
+    "public/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node server.mjs",
+    "cf:dev": "npx wrangler pages dev public",
+    "cf:deploy": "npx wrangler pages deploy public --project-name=github-housekeeping"
+  },
+  "keywords": [
+    "github",
+    "followers",
+    "following",
+    "housekeeping",
+    "unfollow",
+    "gh-cli",
+    "dashboard"
+  ],
+  "license": "MIT"
+}
