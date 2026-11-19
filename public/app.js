@@ -93,6 +93,8 @@ const els = {
   loadingText: document.getElementById('loading-text'),
   errorState: document.getElementById('error-state'),
   errorMessage: document.getElementById('error-message'),
+  errorActions: document.getElementById('error-actions'),
+  errorAuthCtaBtn: document.getElementById('error-auth-cta-btn'),
   emptyState: document.getElementById('empty-state'),
   emptyTitle: document.getElementById('empty-title'),
   emptySubtitle: document.getElementById('empty-subtitle'),
@@ -552,6 +554,9 @@ async function fetchClientGraphQLConnection(token, username, connectionName) {
 
     hasNextPage = Boolean(conn.pageInfo?.hasNextPage);
     afterCursor = conn.pageInfo?.endCursor || null;
+    if (els.loadingText) {
+      els.loadingText.textContent = `Scanning @${username}: fetched ${items.length.toLocaleString()} ${connectionName}...`;
+    }
   }
 
   return items;
@@ -565,6 +570,11 @@ async function fetchClientRestList(token, username, listType) {
     const res = await fetch(url, { headers: buildGitHubHeaders(token) });
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
+      if (res.status === 403 && (errBody.message || '').toLowerCase().includes('rate limit')) {
+        throw new Error(
+          'GitHub public IP rate limit reached (60 requests/hr for unauthenticated browsers). Connect a free GitHub token below to unlock 5,000 requests/hr instantly.'
+        );
+      }
       throw new Error(errBody.message || `GitHub API returned ${res.status}`);
     }
     const data = await res.json();
@@ -585,6 +595,9 @@ async function fetchClientRestList(token, username, listType) {
         publicReposCount: null,
       });
     }
+    if (els.loadingText) {
+      els.loadingText.textContent = `Scanning @${username}: fetched ${items.length.toLocaleString()} ${listType}...`;
+    }
     if (data.length < 100) break;
     page++;
   }
@@ -603,11 +616,24 @@ async function analyzeUserClientDirect(username) {
   );
   if (!profileRes.ok) {
     const errBody = await profileRes.json().catch(() => ({}));
+    if (profileRes.status === 403 && (errBody.message || '').toLowerCase().includes('rate limit')) {
+      throw new Error(
+        'GitHub public IP rate limit reached (60 requests/hr for unauthenticated browsers). Connect a free GitHub token below to unlock 5,000 requests/hr instantly.'
+      );
+    }
     throw new Error(
       errBody.message || `Could not fetch user '${username}' (${profileRes.status})`
     );
   }
   const profileData = await profileRes.json();
+
+  // Safeguard unauthenticated public quota on very large accounts (>2,500 combined followers + following)
+  const totalConnections = Number(profileData.followers || 0) + Number(profileData.following || 0);
+  if (!token && totalConnections > 2500) {
+    throw new Error(
+      `@${profileData.login} has ${totalConnections.toLocaleString()} combined followers/following. Scanning an account this large without a token would exhaust GitHub's 60 req/hr public IP limit. Connect a free GitHub token below to scan large accounts via GraphQL.`
+    );
+  }
 
   let following = [];
   let followers = [];
@@ -731,9 +757,16 @@ async function scanAccount(username) {
     renderProfileAndStats();
     renderUserCards();
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     els.loadingState.classList.add('hidden');
     els.errorState.classList.remove('hidden');
-    els.errorMessage.textContent = err instanceof Error ? err.message : String(err);
+    els.errorMessage.textContent = msg;
+    const needsTokenCta =
+      !state.auth?.authenticated &&
+      (msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('token'));
+    if (els.errorActions) {
+      els.errorActions.classList.toggle('hidden', !needsTokenCta);
+    }
   } finally {
     els.scanBtn.disabled = false;
     els.scanBtn.textContent = 'Scan Account';
@@ -1541,6 +1574,13 @@ els.openAuthModalBtn.addEventListener('click', async () => {
   updateTokenCreationLinks();
   els.authModal.classList.remove('hidden');
 });
+if (els.errorAuthCtaBtn) {
+  els.errorAuthCtaBtn.addEventListener('click', async () => {
+    await detectRuntimeAndAuth();
+    updateTokenCreationLinks();
+    els.authModal.classList.remove('hidden');
+  });
+}
 els.closeAuthModal.addEventListener('click', () => {
   els.authModal.classList.add('hidden');
 });
