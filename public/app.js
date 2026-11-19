@@ -3,6 +3,8 @@ const LOCAL_STORAGE_THEME_KEY = 'gh_housekeeping_theme_v2';
 const LOCAL_STORAGE_VIEW_KEY = 'gh_housekeeping_view_v1';
 const SNAPSHOT_KEY_PREFIX = 'gh_housekeeping_snapshot_v1_';
 const SESSION_STORAGE_PAT_KEY = 'gh_housekeeping_pat_v1';
+const SESSION_UI_STATE_KEY = 'gh_housekeeping_ui_state_v1';
+const SESSION_SCAN_CACHE_KEY = 'gh_housekeeping_scan_cache_v1';
 const GITHUB_USERNAME_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 const UNFOLLOW_DELAY_MS = 300;
 const REPO_DELETE_DELAY_MS = 350;
@@ -260,6 +262,115 @@ function applyViewMode(mode) {
   if (els.viewGridBtn && els.viewCompactBtn) {
     els.viewGridBtn.classList.toggle('active', mode === 'grid');
     els.viewCompactBtn.classList.toggle('active', mode === 'compact');
+  }
+}
+
+function saveWorkspaceState() {
+  try {
+    const uiSnapshot = {
+      username: state.data?.profile?.login || els.usernameInput?.value?.trim() || '',
+      activeTab: state.activeTab,
+      showAllowlistedInNonFollowers: state.showAllowlistedInNonFollowers,
+      searchQuery: state.searchQuery,
+      preset: state.preset,
+      repoPreset: state.repoPreset,
+      sortBy: state.sortBy,
+      repoSortBy: state.repoSortBy,
+      selectedLogins: [...state.selectedLogins],
+      selectedRepos: [...state.selectedRepos],
+    };
+    sessionStorage.setItem(SESSION_UI_STATE_KEY, JSON.stringify(uiSnapshot));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function saveScanCache() {
+  try {
+    if (!state.data?.profile?.login) return;
+    const cache = {
+      username: state.data.profile.login,
+      data: state.data,
+      reposData: state.reposData,
+      cachedAt: new Date().toISOString(),
+    };
+    sessionStorage.setItem(SESSION_SCAN_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    // ignore quota errors on very large accounts
+  }
+}
+
+function tryRestoreWorkspaceSession(preferredUsername) {
+  try {
+    const rawUi = sessionStorage.getItem(SESSION_UI_STATE_KEY);
+    const rawCache = sessionStorage.getItem(SESSION_SCAN_CACHE_KEY);
+    if (!rawCache) return false;
+
+    const cache = JSON.parse(rawCache);
+    if (!cache?.data?.profile?.login) return false;
+
+    // If user explicitly navigated to ?user=someoneElse, don't restore a different user's cache
+    if (
+      preferredUsername &&
+      cache.username.toLowerCase() !== preferredUsername.toLowerCase()
+    ) {
+      return false;
+    }
+
+    state.data = cache.data;
+    state.reposData = cache.reposData || null;
+    state.allowlist =
+      state.runtimeMode === 'local-cli'
+        ? cache.data.allowlist || loadLocalAllowlist()
+        : loadLocalAllowlist();
+
+    if (rawUi) {
+      const ui = JSON.parse(rawUi);
+      if (ui.activeTab) state.activeTab = ui.activeTab;
+      state.showAllowlistedInNonFollowers = Boolean(ui.showAllowlistedInNonFollowers);
+      state.searchQuery = ui.searchQuery || '';
+      state.preset = ui.preset || 'all';
+      state.repoPreset = ui.repoPreset || 'all';
+      state.sortBy = ui.sortBy || 'order-asc';
+      state.repoSortBy = ui.repoSortBy || 'pushed-desc';
+      state.selectedLogins = new Set(Array.isArray(ui.selectedLogins) ? ui.selectedLogins : []);
+      state.selectedRepos = new Set(Array.isArray(ui.selectedRepos) ? ui.selectedRepos : []);
+    }
+
+    // Sync restored UI controls
+    els.usernameInput.value = cache.username;
+    updateTokenCreationLinks(cache.username);
+    if (els.searchInput) els.searchInput.value = state.searchQuery;
+    if (els.showAllowlistedCheckbox) {
+      els.showAllowlistedCheckbox.checked = state.showAllowlistedInNonFollowers;
+    }
+    if (els.sortSelect) els.sortSelect.value = state.sortBy;
+    if (els.repoSortSelect) els.repoSortSelect.value = state.repoSortBy;
+    els.presetBtns.forEach((b) => b.classList.toggle('active', b.dataset.preset === state.preset));
+    els.repoPresetBtns.forEach((b) =>
+      b.classList.toggle('active', b.dataset.repoPreset === state.repoPreset)
+    );
+
+    els.summarySection.classList.remove('hidden');
+    els.controlsSection.classList.remove('hidden');
+    els.welcomeState.classList.add('hidden');
+    els.loadingState.classList.add('hidden');
+
+    renderModeAndAuthUI();
+    renderProfileAndStats();
+    if (state.activeTab === 'repos') {
+      if (state.reposData) {
+        renderRepoCards();
+      } else {
+        loadAndRenderRepos();
+      }
+    } else {
+      renderUserCards();
+    }
+
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -998,6 +1109,8 @@ async function scanAccount(username) {
 
     renderModeAndAuthUI();
     renderProfileAndStats();
+    saveScanCache();
+    saveWorkspaceState();
     if (state.activeTab === 'repos') {
       await loadAndRenderRepos();
     } else {
@@ -1457,6 +1570,7 @@ function renderUserCards() {
     .join('');
 
   els.cardsGrid.innerHTML = html;
+  saveWorkspaceState();
 }
 
 async function addToAllowlist(usernames) {
@@ -1801,6 +1915,7 @@ async function loadAndRenderRepos(force = false) {
 
     state.reposData = payload;
     els.loadingState.classList.add('hidden');
+    saveScanCache();
     renderProfileAndStats();
     renderRepoCards();
   } catch (err) {
@@ -2074,6 +2189,7 @@ function renderRepoCards() {
     .join('');
 
   els.cardsGrid.innerHTML = html;
+  saveWorkspaceState();
 }
 
 function openDeleteRepoModal(repoFullNames) {
@@ -2880,6 +2996,12 @@ els.importAllowlistInput.addEventListener('change', async (e) => {
   const urlParams = new URLSearchParams(window.location.search);
   const queryUser = (urlParams.get('user') || urlParams.get('username') || '').trim();
   const initialUser = queryUser || status.viewerLogin || '';
+
+  // Restore exact tab, filters, selections, and cached scan across page refreshes
+  const restored = tryRestoreWorkspaceSession(queryUser || status.viewerLogin || '');
+  if (restored) {
+    return;
+  }
 
   if (initialUser) {
     els.usernameInput.value = initialUser;
