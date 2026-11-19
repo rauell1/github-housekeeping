@@ -168,6 +168,7 @@ const els = {
   modalAuthUser: document.getElementById('modal-auth-user'),
   modalAuthScopes: document.getElementById('modal-auth-scopes'),
   modalFollowPerm: document.getElementById('modal-follow-perm'),
+  modalRepoPerm: document.getElementById('modal-repo-perm'),
   modalDeleteRepoPerm: document.getElementById('modal-delete-repo-perm'),
   modalRateLimit: document.getElementById('modal-rate-limit'),
   modalCreateTokenLink: document.getElementById('modal-create-token-link'),
@@ -786,10 +787,15 @@ function renderModeAndAuthUI() {
     els.modalFollowPerm.textContent = s.hasFollowScope
       ? '✅ Enabled (Verified owner can unfollow)'
       : '⚠️ Missing user:follow scope (Read-only)';
+    if (els.modalRepoPerm) {
+      els.modalRepoPerm.textContent = s.hasRepoScope
+        ? '✅ Enabled (Can view private repos & archive/unarchive)'
+        : '⚠️ Missing repo scope (Public repos only; cannot archive)';
+    }
     if (els.modalDeleteRepoPerm) {
       els.modalDeleteRepoPerm.textContent = s.hasDeleteRepoScope
         ? '✅ Enabled (Verified owner can delete repos)'
-        : '⚠️ Missing delete_repo scope (Repo view is read-only)';
+        : '⚠️ Missing delete_repo scope (Cannot delete repos)';
     }
     if (els.modalRateLimit) {
       els.modalRateLimit.textContent = s.rateLimit?.limit
@@ -801,6 +807,9 @@ function renderModeAndAuthUI() {
     els.modalAuthUser.textContent = 'Not signed in';
     els.modalAuthScopes.textContent = 'none';
     els.modalFollowPerm.textContent = '❌ Sign in with token to verify ownership & unfollow';
+    if (els.modalRepoPerm) {
+      els.modalRepoPerm.textContent = '❌ Sign in with repo token to archive repos';
+    }
     if (els.modalDeleteRepoPerm) {
       els.modalDeleteRepoPerm.textContent = '❌ Sign in with delete_repo token to delete repos';
     }
@@ -2382,6 +2391,10 @@ async function archiveRepos(repoFullNames, archived = true) {
     const payload = await res.json();
     if (!res.ok) {
       showToast(payload.error || 'Failed to update repository archive state', 'error');
+      if (payload.code === 'MISSING_REPO_SCOPE' || payload.code === 'NO_TOKEN') {
+        updateTokenCreationLinks();
+        els.authModal.classList.remove('hidden');
+      }
       return;
     }
     for (const fullName of payload.succeeded || []) {
@@ -2391,6 +2404,7 @@ async function archiveRepos(repoFullNames, archived = true) {
   } else {
     const token = getBrowserPat();
     if (!token) {
+      updateTokenCreationLinks();
       els.authModal.classList.remove('hidden');
       return;
     }
@@ -2412,8 +2426,17 @@ async function archiveRepos(repoFullNames, archived = true) {
       if (res.ok) {
         updatedSet.add(fullName.toLowerCase());
         state.selectedRepos.delete(fullName);
-      } else if (res.status === 403 || res.status === 404) {
-        showToast('Token needs "repo" scope to archive/unarchive repositories', 'error');
+      } else {
+        const currentScopes = res.headers.get('x-oauth-scopes') || '';
+        const errBody = await res.json().catch(() => ({}));
+        const isFineGrained = token.startsWith('github_pat_');
+        if (!isFineGrained && (res.status === 403 || res.status === 404) && !currentScopes.includes('repo')) {
+          showToast('Your token is missing the "repo" scope. Use the Follow + Repo Deletion link in Auth Settings.', 'error');
+          updateTokenCreationLinks();
+          els.authModal.classList.remove('hidden');
+          return;
+        }
+        showToast(errBody.message || `Could not archive ${fullName} (HTTP ${res.status})`, 'error');
         return;
       }
     }
@@ -2425,6 +2448,7 @@ async function archiveRepos(repoFullNames, archived = true) {
         r.isArchived = archived;
       }
     }
+    saveScanCache();
   }
   renderProfileAndStats();
   renderRepoCards();
