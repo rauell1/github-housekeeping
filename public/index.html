@@ -235,76 +235,80 @@
       </div>
 
       <div class="filters-row">
-        <div class="search-box">
-          <svg class="search-icon" viewBox="0 0 16 16" width="15" height="15" fill="currentColor">
-            <path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path>
-          </svg>
-          <input
-            type="search"
-            id="search-input"
-            placeholder="Filter by username, name, bio, company, or location... (Press /)"
-          />
-        </div>
-
-        <div id="user-preset-pills" class="preset-pills" role="group" aria-label="Quick filters">
-          <button type="button" class="pill-btn active" data-preset="all">All</button>
-          <button type="button" class="pill-btn" data-preset="popular" title="Accounts with 1,000+ followers (requires token/GraphQL scan)">
-            Popular (&ge;1k followers)
-          </button>
-          <button type="button" class="pill-btn" data-preset="regular" title="Accounts with under 1,000 followers">
-            Under 1k followers
-          </button>
-          <button type="button" class="pill-btn" data-preset="dormant" title="Accounts with no profile/repo updates in over 1 year">
-            💤 Dormant (&gt;1yr)
-          </button>
-          <button type="button" class="pill-btn" data-preset="zero-repos" title="Accounts with 0 public repositories">
-            0 Public Repos
-          </button>
-        </div>
-
-        <div id="repo-preset-pills" class="preset-pills hidden" role="group" aria-label="Repository filters">
-          <button type="button" class="pill-btn repo-pill-btn active" data-repo-preset="all">All</button>
-          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="forks">⑂ Forks</button>
-          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="private">🔒 Private</button>
-          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="public">🌐 Public</button>
-          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="archived">📦 Archived</button>
-          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="dormant">💤 Dormant (&gt;1yr)</button>
-          <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="zero-stars">0 Stars</button>
-        </div>
-
-        <div class="view-and-sort">
-          <div id="user-sort-box" class="sort-box">
-            <label for="sort-select">Sort:</label>
-            <select id="sort-select">
-              <option value="order-asc">Follow Order (Oldest first)</option>
-              <option value="order-desc">Follow Order (Newest first)</option>
-              <option value="followers-desc">Followers (High &rarr; Low)</option>
-              <option value="followers-asc">Followers (Low &rarr; High)</option>
-              <option value="activity-asc">Activity (Dormant first)</option>
-              <option value="repos-asc">Public Repos (Low &rarr; High)</option>
-              <option value="login-asc">Username (A &rarr; Z)</option>
-            </select>
+        <div class="filters-primary-row">
+          <div class="search-box">
+            <svg class="search-icon" viewBox="0 0 16 16" width="15" height="15" fill="currentColor">
+              <path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path>
+            </svg>
+            <input
+              type="search"
+              id="search-input"
+              placeholder="Filter by username, name, bio, company, or location... (Press /)"
+            />
           </div>
 
-          <div id="repo-sort-box" class="sort-box hidden">
-            <label for="repo-sort-select">Sort:</label>
-            <select id="repo-sort-select">
-              <option value="pushed-desc">Last Pushed (Newest)</option>
-              <option value="pushed-asc">Last Pushed (Oldest / Dormant)</option>
-              <option value="stars-asc">Stars (Low &rarr; High)</option>
-              <option value="stars-desc">Stars (High &rarr; Low)</option>
-              <option value="size-desc">Size (Largest first)</option>
-              <option value="name-asc">Name (A &rarr; Z)</option>
-            </select>
+          <div class="view-and-sort">
+            <div id="user-sort-box" class="sort-box">
+              <label for="sort-select">Sort:</label>
+              <select id="sort-select">
+                <option value="order-asc">Follow Order (Oldest first)</option>
+                <option value="order-desc">Follow Order (Newest first)</option>
+                <option value="followers-desc">Followers (High &rarr; Low)</option>
+                <option value="followers-asc">Followers (Low &rarr; High)</option>
+                <option value="activity-asc">Activity (Dormant first)</option>
+                <option value="repos-asc">Public Repos (Low &rarr; High)</option>
+                <option value="login-asc">Username (A &rarr; Z)</option>
+              </select>
+            </div>
+
+            <div id="repo-sort-box" class="sort-box hidden">
+              <label for="repo-sort-select">Sort:</label>
+              <select id="repo-sort-select">
+                <option value="pushed-desc">Last Pushed (Newest)</option>
+                <option value="pushed-asc">Last Pushed (Oldest / Dormant)</option>
+                <option value="stars-asc">Stars (Low &rarr; High)</option>
+                <option value="stars-desc">Stars (High &rarr; Low)</option>
+                <option value="size-desc">Size (Largest first)</option>
+                <option value="name-asc">Name (A &rarr; Z)</option>
+              </select>
+            </div>
+
+            <div class="view-toggle" role="group" aria-label="View layout">
+              <button type="button" id="view-grid-btn" class="view-btn active" title="Visual Card Grid">
+                ⊞ Grid
+              </button>
+              <button type="button" id="view-compact-btn" class="view-btn" title="High-Density Compact List">
+                ☰ Compact
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="filters-pills-row">
+          <div id="user-preset-pills" class="preset-pills" role="group" aria-label="Quick filters">
+            <button type="button" class="pill-btn active" data-preset="all">All</button>
+            <button type="button" class="pill-btn" data-preset="popular" title="Accounts with 1,000+ followers (requires token/GraphQL scan)">
+              Popular (&ge;1k followers)
+            </button>
+            <button type="button" class="pill-btn" data-preset="regular" title="Accounts with under 1,000 followers">
+              Under 1k followers
+            </button>
+            <button type="button" class="pill-btn" data-preset="dormant" title="Accounts with no profile/repo updates in over 1 year">
+              💤 Dormant (&gt;1yr)
+            </button>
+            <button type="button" class="pill-btn" data-preset="zero-repos" title="Accounts with 0 public repositories">
+              0 Public Repos
+            </button>
           </div>
 
-          <div class="view-toggle" role="group" aria-label="View layout">
-            <button type="button" id="view-grid-btn" class="view-btn active" title="Visual Card Grid">
-              ⊞ Grid
-            </button>
-            <button type="button" id="view-compact-btn" class="view-btn" title="High-Density Compact List">
-              ☰ Compact
-            </button>
+          <div id="repo-preset-pills" class="preset-pills hidden" role="group" aria-label="Repository filters">
+            <button type="button" class="pill-btn repo-pill-btn active" data-repo-preset="all">All</button>
+            <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="forks">⑂ Forks</button>
+            <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="private">🔒 Private</button>
+            <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="public">🌐 Public</button>
+            <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="archived">📦 Archived</button>
+            <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="dormant">💤 Dormant (&gt;1yr)</button>
+            <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="zero-stars">0 Stars</button>
           </div>
         </div>
       </div>

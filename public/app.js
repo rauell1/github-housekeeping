@@ -1880,6 +1880,31 @@ function updateRepoSelectionToolbar(visibleRepos) {
   }
 }
 
+const LANG_COLORS = {
+  TypeScript: '#3178c6',
+  JavaScript: '#f1e05a',
+  Python: '#3572A5',
+  Go: '#00ADD8',
+  Rust: '#dea584',
+  HTML: '#e34c26',
+  CSS: '#563d7c',
+  Java: '#b07219',
+  'C#': '#178600',
+  'C++': '#f34b7d',
+  C: '#555555',
+  Shell: '#89e051',
+  Dart: '#00B4AB',
+  Swift: '#F05138',
+  Kotlin: '#A97BFF',
+  PHP: '#4F5D95',
+  Ruby: '#701516',
+  Vue: '#41b883',
+};
+
+function getLanguageColor(lang) {
+  return LANG_COLORS[lang] || '#8b949e';
+}
+
 function renderRepoCards() {
   if (!state.reposData) return;
   const visibleRepos = getFilteredAndSortedRepos();
@@ -1920,7 +1945,12 @@ function renderRepoCards() {
         : '';
 
       const metaParts = [];
-      if (langEsc) metaParts.push(`<span>💻 ${langEsc}</span>`);
+      if (langEsc) {
+        const langColor = getLanguageColor(r.language);
+        metaParts.push(
+          `<span><span class="lang-dot" style="background-color:${langColor};"></span>${langEsc}</span>`
+        );
+      }
       metaParts.push(`<span>💾 ${formatSizeKb(r.sizeKb)}</span>`);
 
       let actionButtonHtml = '';
@@ -1974,7 +2004,11 @@ function renderRepoCards() {
               </div>
             </div>
 
-            ${descEsc ? `<p class="card-bio" style="margin-top:10px;" title="${descEsc}">${descEsc}</p>` : ''}
+            ${
+              descEsc
+                ? `<p class="card-bio" style="margin-top:10px;" title="${descEsc}">${descEsc}</p>`
+                : `<p class="card-bio card-bio-empty" style="margin-top:10px;">No description provided</p>`
+            }
             <div class="card-meta-tags" style="margin-top:8px;">${metaParts.join('')}</div>
           </div>
 
