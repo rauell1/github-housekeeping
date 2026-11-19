@@ -1,7 +1,7 @@
 {
   "name": "github-housekeeping",
-  "version": "1.1.0",
-  "description": "Audit GitHub non-followers, curate a protected allowlist, and batch unfollow. Runs as a Cloudflare Pages web app or local CLI via npx.",
+  "version": "1.2.0",
+  "description": "Zero-dependency tool for GitHub Follow & Repository Housekeeping: audit non-followers, curate a protected allowlist, batch unfollow, and safely mass-delete unused repositories.",
   "type": "module",
   "bin": {
     "github-housekeeping": "./server.mjs"

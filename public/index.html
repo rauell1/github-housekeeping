@@ -24,12 +24,12 @@
         </div>
         <div>
           <div class="brand-title-row">
-            <h1>GitHub Follow Housekeeping</h1>
+            <h1>GitHub Housekeeping</h1>
             <button type="button" id="mode-badge-btn" class="mode-badge" title="Click to compare Web Mode vs Local CLI Mode">
               Detecting mode...
             </button>
           </div>
-          <p class="subtitle">Audit non-followers, curate your allowlist, and batch unfollow</p>
+          <p class="subtitle">Audit non-followers, curate your allowlist, and clean up repositories</p>
         </div>
       </div>
 
@@ -197,6 +197,12 @@
           <div class="stat-label">Followers Not Followed Back</div>
           <div id="stat-fans" class="stat-value">0</div>
           <div id="stat-totals" class="stat-meta">0 Following · 0 Followers</div>
+        </button>
+
+        <button type="button" class="stat-card stat-card-repos" data-tab="repos">
+          <div class="stat-label">Owned Repositories</div>
+          <div id="stat-repos" class="stat-value">-</div>
+          <div id="stat-repos-meta" class="stat-meta">Click to inspect &amp; clean up</div>
         </button>
       </div>
     </section>

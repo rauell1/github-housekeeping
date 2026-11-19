@@ -81,6 +81,8 @@ const els = {
   statReciprocity: document.getElementById('stat-reciprocity'),
   statFans: document.getElementById('stat-fans'),
   statTotals: document.getElementById('stat-totals'),
+  statRepos: document.getElementById('stat-repos'),
+  statReposMeta: document.getElementById('stat-repos-meta'),
   statCards: document.querySelectorAll('.stat-card'),
 
   controlsSection: document.getElementById('controls-section'),
@@ -1095,6 +1097,20 @@ function renderProfileAndStats() {
   if (els.tabCountRepos && state.reposData) {
     els.tabCountRepos.textContent = state.reposData.repos.length;
   }
+  if (els.statRepos && els.statReposMeta) {
+    if (state.reposData) {
+      const reposList = state.reposData.repos;
+      const privCount = reposList.filter((r) => r.isPrivate).length;
+      const pubCount = reposList.length - privCount;
+      els.statRepos.textContent = reposList.length.toLocaleString();
+      els.statReposMeta.textContent = state.reposData.includesPrivate
+        ? `${pubCount} public · ${privCount} private`
+        : `${pubCount} public repositories`;
+    } else {
+      els.statRepos.textContent = '-';
+      els.statReposMeta.textContent = 'Click to inspect & clean up';
+    }
+  }
 
   els.statCards.forEach((card) => {
     card.classList.toggle('active', card.dataset.tab === state.activeTab);
@@ -1663,6 +1679,7 @@ async function executePendingUnfollow() {
 
 function formatSizeKb(kb) {
   if (!kb || kb <= 0) return '0 KB';
+  if (kb >= 1024 * 1024) return `${(kb / (1024 * 1024)).toFixed(2)} GB`;
   if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
   return `${kb} KB`;
 }
