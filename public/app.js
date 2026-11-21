@@ -1,29 +1,37 @@
-const LOCAL_STORAGE_ALLOWLIST_KEY = 'gh_housekeeping_allowlist_v1';
-const LOCAL_STORAGE_THEME_KEY = 'gh_housekeeping_theme_v2';
-const LOCAL_STORAGE_VIEW_KEY = 'gh_housekeeping_view_v1';
-const SNAPSHOT_KEY_PREFIX = 'gh_housekeeping_snapshot_v1_';
-const SESSION_STORAGE_PAT_KEY = 'gh_housekeeping_pat_v1';
-const SESSION_UI_STATE_KEY = 'gh_housekeeping_ui_state_v1';
-const SESSION_SCAN_CACHE_KEY = 'gh_housekeeping_scan_cache_v1';
-const GITHUB_USERNAME_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
-const UNFOLLOW_DELAY_MS = 300;
-const REPO_DELETE_DELAY_MS = 350;
-const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+// UI controller. Data access lives in js/backend.js, GitHub logic in
+// lib/github.js, and pure helpers in lib/*.js (all covered by tests).
+
+import { USERNAME_REGEX, isAbortError } from './lib/github.js';
+import { isAllowlisted as allowlistHas } from './lib/allowlist.js';
+import { escapeHtml, safeHttpUrl, formatDuration, plural, toCsv } from './lib/format.js';
+import {
+  getUsersForTab,
+  filterAndSortUsers,
+  filterAndSortRepos,
+  getUnshieldedCreators,
+  rangeBetween,
+  diffFollowers,
+} from './lib/filters.js';
+import { userCardHtml, repoCardHtml, userChipHtml, repoChipHtml, diffChipHtml } from './lib/templates.js';
+import { createBackend, detectMode, loadLocalAllowlist, saveLocalAllowlist } from './js/backend.js';
+import { KEYS, local, session } from './js/storage.js';
+
+const UNDO_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const state = {
   runtimeMode: 'detecting', // 'local-cli' | 'web-client'
-  theme: 'light', // 'light' | 'dark'
-  viewMode: 'grid', // 'grid' | 'compact'
+  backend: null,
+  theme: 'light',
+  viewMode: 'grid',
   auth: null,
   data: null,
-  reposData: null, // { username, includesPrivate, repos: [...] }
-  reposLoading: false,
+  reposData: null,
   allowlist: {},
   activeTab: 'non-followers', // 'non-followers' | 'allowlist' | 'mutuals' | 'fans' | 'repos'
   showAllowlistedInNonFollowers: false,
   searchQuery: '',
-  preset: 'all', // 'all' | 'popular' | 'regular' | 'dormant' | 'zero-repos'
-  repoPreset: 'all', // 'all' | 'forks' | 'private' | 'public' | 'archived' | 'dormant' | 'zero-stars'
+  preset: 'all',
+  repoPreset: 'all',
   sortBy: 'order-asc',
   repoSortBy: 'pushed-desc',
   selectedLogins: new Set(),
@@ -32,761 +40,431 @@ const state = {
   lastClickedRepo: null,
   pendingUnfollowLogins: [],
   pendingDeleteRepos: [],
+  scanController: null,
+  opController: null,
 };
 
+const $ = (id) => document.getElementById(id);
 const els = {
-  scanForm: document.getElementById('scan-form'),
-  usernameInput: document.getElementById('username-input'),
-  scanBtn: document.getElementById('scan-btn'),
-  modeBadgeBtn: document.getElementById('mode-badge-btn'),
-  themeToggleBtn: document.getElementById('theme-toggle-btn'),
-  themeIcon: document.getElementById('theme-icon'),
-  themeLabel: document.getElementById('theme-label'),
-  guideBtn: document.getElementById('guide-btn'),
-  authBtn: document.getElementById('auth-btn'),
-  authDot: document.getElementById('auth-dot'),
-  authLabel: document.getElementById('auth-label'),
+  scanForm: $('scan-form'),
+  usernameInput: $('username-input'),
+  scanBtn: $('scan-btn'),
+  modeBadgeBtn: $('mode-badge-btn'),
+  themeToggleBtn: $('theme-toggle-btn'),
+  themeIcon: $('theme-icon'),
+  themeLabel: $('theme-label'),
+  guideBtn: $('guide-btn'),
+  authBtn: $('auth-btn'),
+  authDot: $('auth-dot'),
+  authLabel: $('auth-label'),
 
-  modesExplainer: document.getElementById('modes-explainer'),
-  closeModesExplainer: document.getElementById('close-modes-explainer'),
-  modeCardWeb: document.getElementById('mode-card-web'),
-  modeCardCli: document.getElementById('mode-card-cli'),
-  webActivePill: document.getElementById('web-active-pill'),
-  cliActivePill: document.getElementById('cli-active-pill'),
+  modesExplainer: $('modes-explainer'),
+  closeModesExplainer: $('close-modes-explainer'),
+  modeCardWeb: $('mode-card-web'),
+  modeCardCli: $('mode-card-cli'),
+  webActivePill: $('web-active-pill'),
+  cliActivePill: $('cli-active-pill'),
 
-  scopeBanner: document.getElementById('scope-banner'),
-  scopeBadgeLabel: document.getElementById('scope-badge-label'),
-  scopeBannerText: document.getElementById('scope-banner-text'),
-  bannerCreateTokenLink: document.getElementById('banner-create-token-link'),
-  copyGhCmdBtn: document.getElementById('copy-gh-cmd-btn'),
-  openAuthModalBtn: document.getElementById('open-auth-modal-btn'),
+  scopeBanner: $('scope-banner'),
+  scopeBadgeLabel: $('scope-badge-label'),
+  scopeBannerText: $('scope-banner-text'),
+  bannerCreateTokenLink: $('banner-create-token-link'),
+  copyGhCmdBtn: $('copy-gh-cmd-btn'),
+  openAuthModalBtn: $('open-auth-modal-btn'),
 
-  summarySection: document.getElementById('summary-section'),
-  profileAvatar: document.getElementById('profile-avatar'),
-  profileName: document.getElementById('profile-name'),
-  profileLink: document.getElementById('profile-link'),
-  scanModeChip: document.getElementById('scan-mode-chip'),
-  ownershipChip: document.getElementById('ownership-chip'),
-  switchToViewerBtn: document.getElementById('switch-to-viewer-btn'),
-  rescanBtn: document.getElementById('rescan-btn'),
-  copyListBtn: document.getElementById('copy-list-btn'),
-  snapshotDiffBanner: document.getElementById('snapshot-diff-banner'),
-  profileBio: document.getElementById('profile-bio'),
-  exportCsvBtn: document.getElementById('export-csv-btn'),
-  exportAllowlistBtn: document.getElementById('export-allowlist-btn'),
-  importAllowlistInput: document.getElementById('import-allowlist-input'),
+  summarySection: $('summary-section'),
+  profileAvatar: $('profile-avatar'),
+  profileName: $('profile-name'),
+  profileLink: $('profile-link'),
+  scanModeChip: $('scan-mode-chip'),
+  ownershipChip: $('ownership-chip'),
+  switchToViewerBtn: $('switch-to-viewer-btn'),
+  rescanBtn: $('rescan-btn'),
+  copyListBtn: $('copy-list-btn'),
+  snapshotDiffBanner: $('snapshot-diff-banner'),
+  undoBanner: $('undo-banner'),
+  undoBannerText: $('undo-banner-text'),
+  undoRefollowBtn: $('undo-refollow-btn'),
+  undoDismissBtn: $('undo-dismiss-btn'),
+  profileBio: $('profile-bio'),
+  exportCsvBtn: $('export-csv-btn'),
+  exportAllowlistBtn: $('export-allowlist-btn'),
+  importAllowlistInput: $('import-allowlist-input'),
 
-  statActionable: document.getElementById('stat-actionable'),
-  statNonFollowersTotal: document.getElementById('stat-nonfollowers-total'),
-  statAllowlisted: document.getElementById('stat-allowlisted'),
-  statAllowlistStorage: document.getElementById('stat-allowlist-storage'),
-  statMutuals: document.getElementById('stat-mutuals'),
-  statReciprocity: document.getElementById('stat-reciprocity'),
-  statFans: document.getElementById('stat-fans'),
-  statTotals: document.getElementById('stat-totals'),
-  statRepos: document.getElementById('stat-repos'),
-  statReposMeta: document.getElementById('stat-repos-meta'),
+  statActionable: $('stat-actionable'),
+  statNonFollowersTotal: $('stat-nonfollowers-total'),
+  statAllowlisted: $('stat-allowlisted'),
+  statAllowlistStorage: $('stat-allowlist-storage'),
+  statMutuals: $('stat-mutuals'),
+  statReciprocity: $('stat-reciprocity'),
+  statFans: $('stat-fans'),
+  statTotals: $('stat-totals'),
+  statRepos: $('stat-repos'),
+  statReposMeta: $('stat-repos-meta'),
   statCards: document.querySelectorAll('.stat-card'),
 
-  controlsSection: document.getElementById('controls-section'),
+  controlsSection: $('controls-section'),
   tabBtns: document.querySelectorAll('.tab-btn'),
-  tabCountNonFollowers: document.getElementById('tab-count-non-followers'),
-  tabCountAllowlist: document.getElementById('tab-count-allowlist'),
-  tabCountMutuals: document.getElementById('tab-count-mutuals'),
-  tabCountFans: document.getElementById('tab-count-fans'),
-  tabCountRepos: document.getElementById('tab-count-repos'),
-  includeAllowlistedWrap: document.getElementById('include-allowlisted-wrap'),
-  showAllowlistedCheckbox: document.getElementById('show-allowlisted-in-nonfollowers'),
+  tabCountNonFollowers: $('tab-count-non-followers'),
+  tabCountAllowlist: $('tab-count-allowlist'),
+  tabCountMutuals: $('tab-count-mutuals'),
+  tabCountFans: $('tab-count-fans'),
+  tabCountRepos: $('tab-count-repos'),
+  includeAllowlistedWrap: $('include-allowlisted-wrap'),
+  showAllowlistedCheckbox: $('show-allowlisted-in-nonfollowers'),
 
-  searchInput: document.getElementById('search-input'),
-  userPresetPills: document.getElementById('user-preset-pills'),
-  repoPresetPills: document.getElementById('repo-preset-pills'),
+  searchInput: $('search-input'),
+  userPresetPills: $('user-preset-pills'),
+  repoPresetPills: $('repo-preset-pills'),
   presetBtns: document.querySelectorAll('.pill-btn[data-preset]'),
   repoPresetBtns: document.querySelectorAll('.repo-pill-btn[data-repo-preset]'),
-  userSortBox: document.getElementById('user-sort-box'),
-  repoSortBox: document.getElementById('repo-sort-box'),
-  sortSelect: document.getElementById('sort-select'),
-  repoSortSelect: document.getElementById('repo-sort-select'),
-  viewGridBtn: document.getElementById('view-grid-btn'),
-  viewCompactBtn: document.getElementById('view-compact-btn'),
+  userSortBox: $('user-sort-box'),
+  repoSortBox: $('repo-sort-box'),
+  sortSelect: $('sort-select'),
+  repoSortSelect: $('repo-sort-select'),
+  viewGridBtn: $('view-grid-btn'),
+  viewCompactBtn: $('view-compact-btn'),
 
-  selectAllCheckbox: document.getElementById('select-all-checkbox'),
-  selectionSummary: document.getElementById('selection-summary'),
-  clearSelectionBtn: document.getElementById('clear-selection-btn'),
-  autoShieldPopularBtn: document.getElementById('auto-shield-popular-btn'),
-  batchAllowlistAddBtn: document.getElementById('batch-allowlist-add-btn'),
-  batchAllowlistRemoveBtn: document.getElementById('batch-allowlist-remove-btn'),
-  batchUnfollowBtn: document.getElementById('batch-unfollow-btn'),
-  batchArchiveReposBtn: document.getElementById('batch-archive-repos-btn'),
-  batchUnarchiveReposBtn: document.getElementById('batch-unarchive-repos-btn'),
-  batchDeleteReposBtn: document.getElementById('batch-delete-repos-btn'),
+  selectAllCheckbox: $('select-all-checkbox'),
+  selectionSummary: $('selection-summary'),
+  clearSelectionBtn: $('clear-selection-btn'),
+  autoShieldPopularBtn: $('auto-shield-popular-btn'),
+  batchAllowlistAddBtn: $('batch-allowlist-add-btn'),
+  batchAllowlistRemoveBtn: $('batch-allowlist-remove-btn'),
+  batchUnfollowBtn: $('batch-unfollow-btn'),
+  batchArchiveReposBtn: $('batch-archive-repos-btn'),
+  batchUnarchiveReposBtn: $('batch-unarchive-repos-btn'),
+  batchDeleteReposBtn: $('batch-delete-repos-btn'),
 
-  welcomeState: document.getElementById('welcome-state'),
-  loadingState: document.getElementById('loading-state'),
-  loadingText: document.getElementById('loading-text'),
-  errorState: document.getElementById('error-state'),
-  errorMessage: document.getElementById('error-message'),
-  errorActions: document.getElementById('error-actions'),
-  errorAuthCtaBtn: document.getElementById('error-auth-cta-btn'),
-  emptyState: document.getElementById('empty-state'),
-  emptyTitle: document.getElementById('empty-title'),
-  emptySubtitle: document.getElementById('empty-subtitle'),
-  cardsGrid: document.getElementById('cards-grid'),
+  activityBar: $('activity-bar'),
+  activityText: $('activity-text'),
+  activityProgressBar: $('activity-progress-bar'),
+  activityStopBtn: $('activity-stop-btn'),
 
-  // Unfollow Modal
-  unfollowModal: document.getElementById('unfollow-modal'),
-  unfollowModalTitle: document.getElementById('unfollow-modal-title'),
-  unfollowModalDesc: document.getElementById('unfollow-modal-desc'),
-  unfollowPreviewList: document.getElementById('unfollow-preview-list'),
-  unfollowProgressWrap: document.getElementById('unfollow-progress-wrap'),
-  unfollowProgressBar: document.getElementById('unfollow-progress-bar'),
-  unfollowProgressText: document.getElementById('unfollow-progress-text'),
-  unfollowModalError: document.getElementById('unfollow-modal-error'),
-  closeUnfollowModal: document.getElementById('close-unfollow-modal'),
-  cancelUnfollowBtn: document.getElementById('cancel-unfollow-btn'),
-  confirmUnfollowBtn: document.getElementById('confirm-unfollow-btn'),
+  welcomeState: $('welcome-state'),
+  loadingState: $('loading-state'),
+  loadingText: $('loading-text'),
+  loadingSubtext: $('loading-subtext'),
+  cancelScanBtn: $('cancel-scan-btn'),
+  errorState: $('error-state'),
+  errorTitle: $('error-title'),
+  errorMessage: $('error-message'),
+  errorActions: $('error-actions'),
+  errorAuthCtaBtn: $('error-auth-cta-btn'),
+  errorRetryBtn: $('error-retry-btn'),
+  emptyState: $('empty-state'),
+  emptyTitle: $('empty-title'),
+  emptySubtitle: $('empty-subtitle'),
+  cardsGrid: $('cards-grid'),
 
-  // Delete Repo Modal
-  deleteRepoModal: document.getElementById('delete-repo-modal'),
-  deleteRepoModalTitle: document.getElementById('delete-repo-modal-title'),
-  deleteRepoModalDesc: document.getElementById('delete-repo-modal-desc'),
-  deleteRepoPreviewList: document.getElementById('delete-repo-preview-list'),
-  deleteRepoConfirmWrap: document.getElementById('delete-repo-confirm-wrap'),
-  deleteRepoConfirmInput: document.getElementById('delete-repo-confirm-input'),
-  deleteRepoProgressWrap: document.getElementById('delete-repo-progress-wrap'),
-  deleteRepoProgressBar: document.getElementById('delete-repo-progress-bar'),
-  deleteRepoProgressText: document.getElementById('delete-repo-progress-text'),
-  deleteRepoModalError: document.getElementById('delete-repo-modal-error'),
-  closeDeleteRepoModal: document.getElementById('close-delete-repo-modal'),
-  cancelDeleteRepoBtn: document.getElementById('cancel-delete-repo-btn'),
-  confirmDeleteRepoBtn: document.getElementById('confirm-delete-repo-btn'),
+  unfollowModal: $('unfollow-modal'),
+  unfollowModalTitle: $('unfollow-modal-title'),
+  unfollowModalDesc: $('unfollow-modal-desc'),
+  unfollowPreviewList: $('unfollow-preview-list'),
+  unfollowProgressWrap: $('unfollow-progress-wrap'),
+  unfollowProgressBar: $('unfollow-progress-bar'),
+  unfollowProgressText: $('unfollow-progress-text'),
+  unfollowModalError: $('unfollow-modal-error'),
+  closeUnfollowModal: $('close-unfollow-modal'),
+  cancelUnfollowBtn: $('cancel-unfollow-btn'),
+  confirmUnfollowBtn: $('confirm-unfollow-btn'),
 
-  // Auth Modal
-  authModal: document.getElementById('auth-modal'),
-  closeAuthModal: document.getElementById('close-auth-modal'),
-  modalRuntimeMode: document.getElementById('modal-runtime-mode'),
-  modalAuthSource: document.getElementById('modal-auth-source'),
-  modalAuthUser: document.getElementById('modal-auth-user'),
-  modalAuthScopes: document.getElementById('modal-auth-scopes'),
-  modalFollowPerm: document.getElementById('modal-follow-perm'),
-  modalRepoPerm: document.getElementById('modal-repo-perm'),
-  modalDeleteRepoPerm: document.getElementById('modal-delete-repo-perm'),
-  modalRateLimit: document.getElementById('modal-rate-limit'),
-  modalCreateTokenLink: document.getElementById('modal-create-token-link'),
-  modalCreateRepoTokenLink: document.getElementById('modal-create-repo-token-link'),
-  modalGhCliSection: document.getElementById('modal-gh-cli-section'),
-  modalPatHeading: document.getElementById('modal-pat-heading'),
-  modalPatDesc: document.getElementById('modal-pat-desc'),
-  modalCopyGhBtn: document.getElementById('modal-copy-gh-btn'),
-  customPatInput: document.getElementById('custom-pat-input'),
-  clearPatBtn: document.getElementById('clear-pat-btn'),
-  savePatBtn: document.getElementById('save-pat-btn'),
+  deleteRepoModal: $('delete-repo-modal'),
+  deleteRepoModalTitle: $('delete-repo-modal-title'),
+  deleteRepoModalDesc: $('delete-repo-modal-desc'),
+  deleteRepoPreviewList: $('delete-repo-preview-list'),
+  deleteRepoConfirmWrap: $('delete-repo-confirm-wrap'),
+  deleteRepoConfirmInput: $('delete-repo-confirm-input'),
+  deleteRepoProgressWrap: $('delete-repo-progress-wrap'),
+  deleteRepoProgressBar: $('delete-repo-progress-bar'),
+  deleteRepoProgressText: $('delete-repo-progress-text'),
+  deleteRepoModalError: $('delete-repo-modal-error'),
+  closeDeleteRepoModal: $('close-delete-repo-modal'),
+  cancelDeleteRepoBtn: $('cancel-delete-repo-btn'),
+  confirmDeleteRepoBtn: $('confirm-delete-repo-btn'),
 
-  toastContainer: document.getElementById('toast-container'),
+  authModal: $('auth-modal'),
+  closeAuthModal: $('close-auth-modal'),
+  modalRuntimeMode: $('modal-runtime-mode'),
+  modalAuthSource: $('modal-auth-source'),
+  modalAuthUser: $('modal-auth-user'),
+  modalAuthScopes: $('modal-auth-scopes'),
+  modalFollowPerm: $('modal-follow-perm'),
+  modalRepoPerm: $('modal-repo-perm'),
+  modalDeleteRepoPerm: $('modal-delete-repo-perm'),
+  modalRateLimit: $('modal-rate-limit'),
+  modalCreateTokenLink: $('modal-create-token-link'),
+  modalCreateRepoTokenLink: $('modal-create-repo-token-link'),
+  modalGhCliSection: $('modal-gh-cli-section'),
+  modalCopyGhBtn: $('modal-copy-gh-btn'),
+  customPatInput: $('custom-pat-input'),
+  clearPatBtn: $('clear-pat-btn'),
+  savePatBtn: $('save-pat-btn'),
+
+  toastContainer: $('toast-container'),
 };
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
 
-const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const show = (el, visible = true) => el?.classList.toggle('hidden', !visible);
+const hide = (el) => show(el, false);
+const errorText = (err) => (err instanceof Error ? err.message : String(err));
+const isAllowlisted = (login) => allowlistHas(state.allowlist, login);
+const isCli = () => state.runtimeMode === 'local-cli';
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function safeHttpUrl(rawUrl) {
-  try {
-    const parsed = new URL(String(rawUrl || ''));
-    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
-      return parsed.href;
-    }
-  } catch {
-    // ignore invalid URLs
-  }
-  return '#';
-}
-
-function formatCount(num) {
-  if (num === null || num === undefined) return '-';
-  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
-  if (num >= 1_000) return `${(num / 1_000).toFixed(1)}k`;
-  return num.toLocaleString();
-}
-
-function showToast(message, type = 'success') {
+function showToast(message, type = 'success', { action, onAction, duration = 4200 } = {}) {
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.textContent = message;
+  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  const text = document.createElement('span');
+  text.textContent = message;
+  toast.appendChild(text);
+  if (action && onAction) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-action';
+    btn.textContent = action;
+    btn.addEventListener('click', () => {
+      toast.remove();
+      onAction();
+    });
+    toast.appendChild(btn);
+  }
   els.toastContainer.appendChild(toast);
-  setTimeout(() => {
-    toast.remove();
-  }, 3600);
+  setTimeout(() => toast.remove(), duration);
 }
 
-// Theme Management (Light Mode by default + Dark Mode toggle)
-function initTheme() {
-  let saved = 'light';
-  try {
-    saved = localStorage.getItem(LOCAL_STORAGE_THEME_KEY) || 'light';
-  } catch {
-    // ignore
-  }
-  applyTheme(saved === 'dark' ? 'dark' : 'light');
+function retryMessage({ waitMs, reason }) {
+  const why = reason === 'server' ? 'GitHub is temporarily unavailable' : 'GitHub rate limit reached';
+  return `${why}. Waiting ${formatDuration(waitMs)} before retrying automatically...`;
 }
+
+function openAuthModal() {
+  updateTokenCreationLinks();
+  show(els.authModal);
+}
+
+// ---------------------------------------------------------------------------
+// Theme and view mode
+// ---------------------------------------------------------------------------
 
 function applyTheme(theme) {
   state.theme = theme;
   document.documentElement.setAttribute('data-theme', theme);
-  try {
-    localStorage.setItem(LOCAL_STORAGE_THEME_KEY, theme);
-  } catch {
-    // ignore
-  }
-  if (theme === 'light') {
-    els.themeIcon.textContent = '🌙';
-    els.themeLabel.textContent = 'Dark';
-  } else {
-    els.themeIcon.textContent = '☀️';
-    els.themeLabel.textContent = 'Light';
-  }
-}
-
-function initViewMode() {
-  let saved = 'grid';
-  try {
-    saved = localStorage.getItem(LOCAL_STORAGE_VIEW_KEY) || 'grid';
-  } catch {
-    // ignore
-  }
-  applyViewMode(saved === 'compact' ? 'compact' : 'grid');
+  local.set(KEYS.theme, theme);
+  els.themeIcon.textContent = theme === 'light' ? '🌙' : '☀️';
+  els.themeLabel.textContent = theme === 'light' ? 'Dark' : 'Light';
 }
 
 function applyViewMode(mode) {
   state.viewMode = mode;
-  try {
-    localStorage.setItem(LOCAL_STORAGE_VIEW_KEY, mode);
-  } catch {
-    // ignore
-  }
-  if (els.cardsGrid) {
-    els.cardsGrid.classList.toggle('compact-view', mode === 'compact');
-  }
-  if (els.viewGridBtn && els.viewCompactBtn) {
-    els.viewGridBtn.classList.toggle('active', mode === 'grid');
-    els.viewCompactBtn.classList.toggle('active', mode === 'compact');
-  }
+  local.set(KEYS.view, mode);
+  els.cardsGrid.classList.toggle('compact-view', mode === 'compact');
+  els.viewGridBtn.classList.toggle('active', mode === 'grid');
+  els.viewCompactBtn.classList.toggle('active', mode === 'compact');
+  els.viewGridBtn.setAttribute('aria-pressed', String(mode === 'grid'));
+  els.viewCompactBtn.setAttribute('aria-pressed', String(mode === 'compact'));
 }
 
+// ---------------------------------------------------------------------------
+// Session persistence
+// ---------------------------------------------------------------------------
+
 function saveWorkspaceState() {
-  try {
-    const uiSnapshot = {
-      username: state.data?.profile?.login || els.usernameInput?.value?.trim() || '',
-      activeTab: state.activeTab,
-      showAllowlistedInNonFollowers: state.showAllowlistedInNonFollowers,
-      searchQuery: state.searchQuery,
-      preset: state.preset,
-      repoPreset: state.repoPreset,
-      sortBy: state.sortBy,
-      repoSortBy: state.repoSortBy,
-      selectedLogins: [...state.selectedLogins],
-      selectedRepos: [...state.selectedRepos],
-    };
-    sessionStorage.setItem(SESSION_UI_STATE_KEY, JSON.stringify(uiSnapshot));
-  } catch {
-    // ignore storage errors
-  }
+  session.setJson(KEYS.uiState, {
+    username: state.data?.profile?.login || els.usernameInput.value.trim() || '',
+    activeTab: state.activeTab,
+    showAllowlistedInNonFollowers: state.showAllowlistedInNonFollowers,
+    searchQuery: state.searchQuery,
+    preset: state.preset,
+    repoPreset: state.repoPreset,
+    sortBy: state.sortBy,
+    repoSortBy: state.repoSortBy,
+    selectedLogins: [...state.selectedLogins],
+    selectedRepos: [...state.selectedRepos],
+  });
 }
 
 function saveScanCache() {
-  try {
-    if (!state.data?.profile?.login) return;
-    const cache = {
-      username: state.data.profile.login,
-      data: state.data,
-      reposData: state.reposData,
-      cachedAt: new Date().toISOString(),
-    };
-    sessionStorage.setItem(SESSION_SCAN_CACHE_KEY, JSON.stringify(cache));
-  } catch {
-    // ignore quota errors on very large accounts
-  }
+  if (!state.data?.profile?.login) return;
+  session.setJson(KEYS.scanCache, {
+    username: state.data.profile.login,
+    data: state.data,
+    reposData: state.reposData,
+    cachedAt: new Date().toISOString(),
+  });
+}
+
+function syncControlsFromState() {
+  els.searchInput.value = state.searchQuery;
+  els.showAllowlistedCheckbox.checked = state.showAllowlistedInNonFollowers;
+  els.sortSelect.value = state.sortBy;
+  els.repoSortSelect.value = state.repoSortBy;
+  els.presetBtns.forEach((b) => b.classList.toggle('active', b.dataset.preset === state.preset));
+  els.repoPresetBtns.forEach((b) => b.classList.toggle('active', b.dataset.repoPreset === state.repoPreset));
 }
 
 function tryRestoreWorkspaceSession(preferredUsername) {
-  try {
-    const rawUi = sessionStorage.getItem(SESSION_UI_STATE_KEY);
-    const rawCache = sessionStorage.getItem(SESSION_SCAN_CACHE_KEY);
-    if (!rawCache) return false;
+  const cache = session.getJson(KEYS.scanCache);
+  if (!cache?.data?.profile?.login) return false;
+  if (preferredUsername && cache.username.toLowerCase() !== preferredUsername.toLowerCase()) return false;
 
-    const cache = JSON.parse(rawCache);
-    if (!cache?.data?.profile?.login) return false;
+  state.data = cache.data;
+  state.reposData = cache.reposData || null;
+  state.allowlist = isCli() ? cache.data.allowlist || loadLocalAllowlist() : loadLocalAllowlist();
 
-    // If user explicitly navigated to ?user=someoneElse, don't restore a different user's cache
-    if (
-      preferredUsername &&
-      cache.username.toLowerCase() !== preferredUsername.toLowerCase()
-    ) {
-      return false;
-    }
-
-    state.data = cache.data;
-    state.reposData = cache.reposData || null;
-    state.allowlist =
-      state.runtimeMode === 'local-cli'
-        ? cache.data.allowlist || loadLocalAllowlist()
-        : loadLocalAllowlist();
-
-    if (rawUi) {
-      const ui = JSON.parse(rawUi);
-      if (ui.activeTab) state.activeTab = ui.activeTab;
-      state.showAllowlistedInNonFollowers = Boolean(ui.showAllowlistedInNonFollowers);
-      state.searchQuery = ui.searchQuery || '';
-      state.preset = ui.preset || 'all';
-      state.repoPreset = ui.repoPreset || 'all';
-      state.sortBy = ui.sortBy || 'order-asc';
-      state.repoSortBy = ui.repoSortBy || 'pushed-desc';
-      state.selectedLogins = new Set(Array.isArray(ui.selectedLogins) ? ui.selectedLogins : []);
-      state.selectedRepos = new Set(Array.isArray(ui.selectedRepos) ? ui.selectedRepos : []);
-    }
-
-    // Sync restored UI controls
-    els.usernameInput.value = cache.username;
-    updateTokenCreationLinks(cache.username);
-    if (els.searchInput) els.searchInput.value = state.searchQuery;
-    if (els.showAllowlistedCheckbox) {
-      els.showAllowlistedCheckbox.checked = state.showAllowlistedInNonFollowers;
-    }
-    if (els.sortSelect) els.sortSelect.value = state.sortBy;
-    if (els.repoSortSelect) els.repoSortSelect.value = state.repoSortBy;
-    els.presetBtns.forEach((b) => b.classList.toggle('active', b.dataset.preset === state.preset));
-    els.repoPresetBtns.forEach((b) =>
-      b.classList.toggle('active', b.dataset.repoPreset === state.repoPreset)
-    );
-
-    els.summarySection.classList.remove('hidden');
-    els.controlsSection.classList.remove('hidden');
-    els.welcomeState.classList.add('hidden');
-    els.loadingState.classList.add('hidden');
-
-    renderModeAndAuthUI();
-    renderProfileAndStats();
-    if (state.activeTab === 'repos') {
-      if (state.reposData) {
-        renderRepoCards();
-      } else {
-        loadAndRenderRepos();
-      }
-    } else {
-      renderUserCards();
-    }
-
-    return true;
-  } catch {
-    return false;
+  const ui = session.getJson(KEYS.uiState);
+  if (ui) {
+    if (ui.activeTab) state.activeTab = ui.activeTab;
+    state.showAllowlistedInNonFollowers = Boolean(ui.showAllowlistedInNonFollowers);
+    state.searchQuery = ui.searchQuery || '';
+    state.preset = ui.preset || 'all';
+    state.repoPreset = ui.repoPreset || 'all';
+    state.sortBy = ui.sortBy || 'order-asc';
+    state.repoSortBy = ui.repoSortBy || 'pushed-desc';
+    state.selectedLogins = new Set(Array.isArray(ui.selectedLogins) ? ui.selectedLogins : []);
+    state.selectedRepos = new Set(Array.isArray(ui.selectedRepos) ? ui.selectedRepos : []);
   }
+
+  els.usernameInput.value = cache.username;
+  updateTokenCreationLinks(cache.username);
+  syncControlsFromState();
+  show(els.summarySection);
+  show(els.controlsSection);
+  hide(els.welcomeState);
+  hide(els.loadingState);
+
+  renderModeAndAuthUI();
+  renderProfileAndStats();
+  renderUndoBanner();
+  renderActiveView();
+  return true;
 }
 
-function isDormantUser(user) {
-  if (!user?.updatedAt) return false;
-  const ts = Date.parse(user.updatedAt);
-  if (Number.isNaN(ts)) return false;
-  return Date.now() - ts > ONE_YEAR_MS;
-}
-
-function formatRelativeActivity(updatedAt) {
-  if (!updatedAt) return null;
-  const ts = Date.parse(updatedAt);
-  if (Number.isNaN(ts)) return null;
-  const diffDays = Math.floor((Date.now() - ts) / (1000 * 60 * 60 * 24));
-  if (diffDays <= 1) return { label: 'Active today', dormant: false };
-  if (diffDays < 30) return { label: `Active ${diffDays}d ago`, dormant: false };
-  const diffMonths = Math.floor(diffDays / 30);
-  if (diffMonths < 12) return { label: `Active ${diffMonths}mo ago`, dormant: false };
-  const diffYears = (diffDays / 365).toFixed(1).replace(/\.0$/, '');
-  return { label: `💤 Dormant (${diffYears}yr)`, dormant: true };
-}
+// ---------------------------------------------------------------------------
+// Realtime follower diff
+// ---------------------------------------------------------------------------
 
 function computeAndRenderSnapshotDiff(payload) {
-  if (!els.snapshotDiffBanner || !payload?.profile?.login) return;
-  const loginKey = payload.profile.login.toLowerCase();
-  const storageKey = `${SNAPSHOT_KEY_PREFIX}${loginKey}`;
+  const storageKey = `${KEYS.snapshotPrefix}${payload.profile.login.toLowerCase()}`;
+  const currentFollowers = [...payload.mutuals, ...payload.fans].map((u) => u.login);
+  const prev = local.getJson(storageKey);
+  local.setJson(storageKey, { scannedAt: new Date().toISOString(), followers: currentFollowers });
 
-  // Current followers = mutuals + fans
-  const currentFollowers = [
-    ...(payload.mutuals || []).map((u) => u.login),
-    ...(payload.fans || []).map((u) => u.login),
-  ];
-  const currentSet = new Set(currentFollowers.map((l) => l.toLowerCase()));
+  if (!prev || !Array.isArray(prev.followers)) return hide(els.snapshotDiffBanner);
+  const { lost, gained } = diffFollowers(prev.followers, currentFollowers);
+  if (lost.length === 0 && gained.length === 0) return hide(els.snapshotDiffBanner);
 
-  let prev = null;
-  try {
-    const raw = localStorage.getItem(storageKey);
-    if (raw) prev = JSON.parse(raw);
-  } catch {
-    // ignore
-  }
-
-  // Save current snapshot
-  try {
-    localStorage.setItem(
-      storageKey,
-      JSON.stringify({
-        scannedAt: new Date().toISOString(),
-        followers: currentFollowers,
-      })
-    );
-  } catch {
-    // ignore
-  }
-
-  if (!prev || !Array.isArray(prev.followers)) {
-    els.snapshotDiffBanner.classList.add('hidden');
-    return;
-  }
-
-  const prevSet = new Set(prev.followers.map((l) => String(l).toLowerCase()));
-  const lostFollowers = prev.followers.filter((l) => !currentSet.has(String(l).toLowerCase()));
-  const newFollowers = currentFollowers.filter((l) => !prevSet.has(String(l).toLowerCase()));
-
-  if (lostFollowers.length === 0 && newFollowers.length === 0) {
-    els.snapshotDiffBanner.classList.add('hidden');
-    return;
-  }
-
-  const lostChips = lostFollowers
-    .slice(0, 12)
-    .map(
-      (l) =>
-        `<a href="https://github.com/${encodeURIComponent(
-          l
-        )}" target="_blank" rel="noopener noreferrer" class="diff-chip-lost">− @${escapeHtml(
-          l
-        )}</a>`
-    )
-    .join('');
-
-  const gainedChips = newFollowers
-    .slice(0, 12)
-    .map(
-      (l) =>
-        `<a href="https://github.com/${encodeURIComponent(
-          l
-        )}" target="_blank" rel="noopener noreferrer" class="diff-chip-gained">+ @${escapeHtml(
-          l
-        )}</a>`
-    )
-    .join('');
+  const parts = [];
+  if (lost.length) parts.push(`<strong>${lost.length}</strong> unfollowed you`);
+  if (gained.length) parts.push(`<strong>${gained.length}</strong> new follower${gained.length === 1 ? '' : 's'}`);
+  const chips = [
+    ...lost.slice(0, 12).map((l) => diffChipHtml(l, 'lost')),
+    ...gained.slice(0, 12).map((l) => diffChipHtml(l, 'gained')),
+  ].join('');
 
   els.snapshotDiffBanner.innerHTML = `
     <div>
-      <strong>🔔 Realtime Diff Since Last Scan:</strong>
-      <span>
-        ${
-          lostFollowers.length > 0
-            ? `<strong>${lostFollowers.length}</strong> unfollowed you`
-            : ''
-        }
-        ${lostFollowers.length > 0 && newFollowers.length > 0 ? ' · ' : ''}
-        ${
-          newFollowers.length > 0
-            ? `<strong>${newFollowers.length}</strong> new follower${
-                newFollowers.length === 1 ? '' : 's'
-              }`
-            : ''
-        }
-      </span>
-      <div class="diff-chips">${lostChips}${gainedChips}</div>
-    </div>
-  `;
-  els.snapshotDiffBanner.classList.remove('hidden');
+      <strong>🔔 Changes Since Last Scan:</strong>
+      <span>${parts.join(' · ')}</span>
+      <div class="diff-chips">${chips}</div>
+    </div>`;
+  show(els.snapshotDiffBanner);
 }
 
-// Build pre-filled GitHub Token creation URL tailored to the account entered
+// ---------------------------------------------------------------------------
+// Auth and token helper
+// ---------------------------------------------------------------------------
+
 function updateTokenCreationLinks(targetUsername) {
-  const cleanUser = (
-    targetUsername ||
-    state.data?.profile?.login ||
-    els.usernameInput.value ||
-    ''
-  )
+  const cleanUser = (targetUsername || state.data?.profile?.login || els.usernameInput.value || '')
     .trim()
     .replace(/^@/, '');
+  const suffix = cleanUser ? ` (@${cleanUser})` : '';
+  const tokenUrl = (description, scopes) =>
+    `https://github.com/settings/tokens/new?description=${encodeURIComponent(description)}&scopes=${scopes}`;
 
-  const description = cleanUser
-    ? `GitHub Follow Housekeeping (@${cleanUser})`
-    : 'GitHub Follow Housekeeping';
+  const followUrl = tokenUrl(`GitHub Housekeeping: Follow${suffix}`, 'user:follow');
+  const fullUrl = tokenUrl(`GitHub Housekeeping: Follow + Repos${suffix}`, 'user:follow,repo,delete_repo');
 
-  const url = `https://github.com/settings/tokens/new?description=${encodeURIComponent(
-    description
-  )}&scopes=user:follow`;
-
-  const repoUrl = `https://github.com/settings/tokens/new?description=${encodeURIComponent(
-    cleanUser ? `GitHub Follow & Repo Housekeeping (@${cleanUser})` : 'GitHub Follow & Repo Housekeeping'
-  )}&scopes=user:follow,delete_repo,repo`;
-
-  if (els.bannerCreateTokenLink) {
-    els.bannerCreateTokenLink.href = url;
-    els.bannerCreateTokenLink.textContent = cleanUser
-      ? `1. Generate Token for @${cleanUser} ↗`
-      : '1. Generate Token on GitHub ↗';
-  }
-  if (els.modalCreateTokenLink) {
-    els.modalCreateTokenLink.href = url;
-    els.modalCreateTokenLink.textContent = cleanUser
-      ? `Follow Only (@${cleanUser}: user:follow) ↗`
-      : 'Follow Housekeeping Only (user:follow) ↗';
-  }
-  if (els.modalCreateRepoTokenLink) {
-    els.modalCreateRepoTokenLink.href = repoUrl;
-    els.modalCreateRepoTokenLink.textContent = cleanUser
-      ? `Full Housekeeping: Follow + Archive/Delete (@${cleanUser}: repo, delete_repo) ↗`
-      : 'Full Housekeeping: Follow + Archive/Delete Repos (user:follow, repo, delete_repo) ↗';
-  }
+  els.bannerCreateTokenLink.href = followUrl;
+  els.bannerCreateTokenLink.textContent = cleanUser
+    ? `1. Generate Token for @${cleanUser} ↗`
+    : '1. Generate Token on GitHub ↗';
+  els.modalCreateTokenLink.href = followUrl;
+  els.modalCreateTokenLink.textContent = 'Follow Housekeeping Only (user:follow) ↗';
+  els.modalCreateRepoTokenLink.href = fullUrl;
+  els.modalCreateRepoTokenLink.textContent = 'Full Housekeeping: Follow + Archive/Delete Repos (user:follow, repo, delete_repo) ↗';
 }
 
-// Returns true ONLY when authenticated AND the scanned account belongs to the authenticated user
 function isViewingOwnVerifiedAccount() {
-  if (!state.auth?.authenticated || !state.auth?.viewerLogin || !state.data?.profile?.login) {
-    return false;
-  }
-  return (
-    state.auth.viewerLogin.toLowerCase() === state.data.profile.login.toLowerCase()
-  );
+  const viewer = state.auth?.authenticated ? state.auth.viewerLogin : null;
+  const scanned = state.data?.profile?.login;
+  return Boolean(viewer && scanned && viewer.toLowerCase() === scanned.toLowerCase());
 }
 
-function isAllowlisted(login) {
-  return Boolean(state.allowlist[String(login).toLowerCase()]);
-}
-
-function loadLocalAllowlist() {
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_ALLOWLIST_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveLocalAllowlist(allowlist) {
-  try {
-    localStorage.setItem(LOCAL_STORAGE_ALLOWLIST_KEY, JSON.stringify(allowlist));
-  } catch {
-    // ignore
-  }
-}
-
-function getBrowserPat() {
-  try {
-    return sessionStorage.getItem(SESSION_STORAGE_PAT_KEY) || '';
-  } catch {
-    return '';
-  }
-}
-
-function setBrowserPat(token) {
-  try {
-    if (token) {
-      sessionStorage.setItem(SESSION_STORAGE_PAT_KEY, token);
-    } else {
-      sessionStorage.removeItem(SESSION_STORAGE_PAT_KEY);
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function buildGitHubHeaders(token) {
-  const headers = {
-    Accept: 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28',
-  };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  return headers;
-}
-
-async function checkWebClientAuthStatus() {
-  const token = getBrowserPat();
-  if (!token) {
-    return {
-      mode: 'web-client',
-      authenticated: false,
-      source: 'none',
-      viewerLogin: null,
-      viewerName: null,
-      viewerAvatar: null,
-      scopes: [],
-      hasFollowScope: false,
-    };
-  }
-
-  const res = await fetch('https://api.github.com/user', {
-    headers: buildGitHubHeaders(token),
-  });
-
-  if (!res.ok) {
-    return {
-      mode: 'web-client',
-      authenticated: false,
-      source: 'browser-pat',
-      viewerLogin: null,
-      viewerName: null,
-      viewerAvatar: null,
-      scopes: [],
-      hasFollowScope: false,
-      error: `GitHub API returned ${res.status}`,
-    };
-  }
-
-  const user = await res.json();
-  const scopesHeader = res.headers.get('x-oauth-scopes') || '';
-  const scopes = scopesHeader
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const isFineGrained = token.startsWith('github_pat_');
-  const hasFollowScope =
-    isFineGrained || scopes.includes('user') || scopes.includes('user:follow');
-  const hasRepoScope = isFineGrained || scopes.includes('repo');
-  const hasDeleteRepoScope = isFineGrained || scopes.includes('delete_repo');
-  const rateLimit = {
-    limit: Number(res.headers.get('x-ratelimit-limit') || 0),
-    remaining: Number(res.headers.get('x-ratelimit-remaining') || 0),
-    reset: Number(res.headers.get('x-ratelimit-reset') || 0),
-  };
-
-  return {
-    mode: 'web-client',
-    authenticated: true,
-    source: 'browser-pat',
-    viewerLogin: user.login,
-    viewerName: user.name || user.login,
-    viewerAvatar: user.avatar_url,
-    scopes,
-    isFineGrained,
-    hasFollowScope,
-    hasRepoScope,
-    hasDeleteRepoScope,
-    rateLimit,
-  };
-}
-
-async function detectRuntimeAndAuth() {
-  try {
-    const res = await fetch('/api/status', { cache: 'no-store' });
-    const contentType = res.headers.get('content-type') || '';
-    if (res.ok && contentType.includes('application/json')) {
-      const status = await res.json();
-      state.runtimeMode = 'local-cli';
-      state.auth = status;
-      renderModeAndAuthUI();
-      return status;
-    }
-  } catch {
-    // Fallback to Web Client mode
-  }
-
-  state.runtimeMode = 'web-client';
-  state.allowlist = loadLocalAllowlist();
-  const status = await checkWebClientAuthStatus();
-  state.auth = status;
-  renderModeAndAuthUI();
-  return status;
+function authSourceLabel(source) {
+  if (source === 'gh-cli') return 'gh CLI';
+  if (source === 'browser-pat') return 'Browser PAT';
+  return 'PAT';
 }
 
 function renderModeAndAuthUI() {
-  const isCli = state.runtimeMode === 'local-cli';
+  const cli = isCli();
   const s = state.auth;
   updateTokenCreationLinks();
 
-  if (isCli) {
-    els.modeBadgeBtn.textContent = '💻 Local CLI Mode';
-    els.modeBadgeBtn.className = 'mode-badge mode-cli';
-    els.modeCardCli.classList.add('active-mode');
-    els.modeCardWeb.classList.remove('active-mode');
-    els.cliActivePill.classList.remove('hidden');
-    els.webActivePill.classList.add('hidden');
-    els.statAllowlistStorage.textContent = 'Saved to disk (allowlist.json)';
-    els.modalRuntimeMode.textContent = '💻 Local CLI Server (127.0.0.1)';
-    els.modalGhCliSection.classList.remove('hidden');
-    els.clearPatBtn.textContent = 'Use Default (gh CLI)';
-  } else {
-    els.modeBadgeBtn.textContent = '🌐 Web App Mode';
-    els.modeBadgeBtn.className = 'mode-badge mode-web';
-    els.modeCardWeb.classList.add('active-mode');
-    els.modeCardCli.classList.remove('active-mode');
-    els.webActivePill.classList.remove('hidden');
-    els.cliActivePill.classList.add('hidden');
-    els.statAllowlistStorage.textContent = 'Saved in browser localStorage';
-    els.modalRuntimeMode.textContent = '🌐 Web App Mode (Cloudflare Browser-Direct)';
-    els.modalGhCliSection.classList.add('hidden');
-    els.clearPatBtn.textContent = 'Clear Browser Token';
-  }
+  els.modeBadgeBtn.textContent = cli ? '💻 Local CLI Mode' : '🌐 Web App Mode';
+  els.modeBadgeBtn.className = `mode-badge ${cli ? 'mode-cli' : 'mode-web'}`;
+  els.modeCardCli.classList.toggle('active-mode', cli);
+  els.modeCardWeb.classList.toggle('active-mode', !cli);
+  show(els.cliActivePill, cli);
+  show(els.webActivePill, !cli);
+  els.statAllowlistStorage.textContent = cli ? 'Saved to disk (allowlist.json)' : 'Saved in browser localStorage';
+  els.modalRuntimeMode.textContent = cli ? '💻 Local CLI Server (127.0.0.1)' : '🌐 Web App Mode (Browser-Direct)';
+  show(els.modalGhCliSection, cli);
+  els.clearPatBtn.textContent = cli ? 'Use Default (gh CLI)' : 'Clear Browser Token';
 
-  // Check if user is signed in AND whether they are viewing another user's profile
   const scannedLogin = state.data?.profile?.login;
   const viewingDifferentAccount =
-    s?.authenticated &&
-    s?.viewerLogin &&
-    scannedLogin &&
-    s.viewerLogin.toLowerCase() !== scannedLogin.toLowerCase();
+    s?.authenticated && s.viewerLogin && scannedLogin && s.viewerLogin.toLowerCase() !== scannedLogin.toLowerCase();
 
-  if (!s || !s.authenticated) {
+  if (!s?.authenticated) {
     els.authDot.className = 'status-dot';
     els.authLabel.textContent = 'Sign In / Get Token';
-    els.scopeBanner.classList.remove('hidden');
+    show(els.scopeBanner);
     els.scopeBadgeLabel.textContent = 'Public Read-Only View';
-    els.bannerCreateTokenLink.classList.remove('hidden');
-    els.copyGhCmdBtn.classList.toggle('hidden', !isCli);
+    show(els.bannerCreateTokenLink);
+    show(els.copyGhCmdBtn, cli);
     els.scopeBannerText.innerHTML =
-      'Anyone can view public GitHub following lists, but <strong>unfollowing is locked</strong> until you verify account ownership with a token.';
+      'Anyone can view public GitHub following lists, but <strong>unfollowing and repository changes are locked</strong> until you verify account ownership with a token.';
   } else if (viewingDifferentAccount) {
     els.authDot.className = 'status-dot readonly';
     els.authLabel.textContent = `Signed in as @${s.viewerLogin}`;
-    els.scopeBanner.classList.remove('hidden');
-    els.scopeBadgeLabel.textContent = `Viewing @${escapeHtml(scannedLogin)} (Read-Only)`;
-    els.bannerCreateTokenLink.classList.add('hidden');
-    els.copyGhCmdBtn.classList.add('hidden');
-    els.scopeBannerText.innerHTML = `You are signed in as <strong>@${escapeHtml(
-      s.viewerLogin
-    )}</strong>, so unfollowing is disabled while browsing <strong>@${escapeHtml(
-      scannedLogin
-    )}</strong>'s public profile.`;
+    show(els.scopeBanner);
+    // textContent: no escaping needed (escaping here would show &amp; literally)
+    els.scopeBadgeLabel.textContent = `Viewing @${scannedLogin} (Read-Only)`;
+    hide(els.bannerCreateTokenLink);
+    hide(els.copyGhCmdBtn);
+    els.scopeBannerText.innerHTML = `You are signed in as <strong>@${escapeHtml(s.viewerLogin)}</strong>, so changes are disabled while browsing <strong>@${escapeHtml(scannedLogin)}</strong>'s public profile.`;
   } else if (s.hasFollowScope) {
     els.authDot.className = 'status-dot online';
-    const src =
-      s.source === 'gh-cli'
-        ? 'gh CLI'
-        : s.source === 'browser-pat'
-        ? 'Browser PAT'
-        : 'PAT';
-    els.authLabel.textContent = `@${s.viewerLogin} (${src} · Verified Owner)`;
-    els.scopeBanner.classList.add('hidden');
+    els.authLabel.textContent = `@${s.viewerLogin} (${authSourceLabel(s.source)} · Verified Owner)`;
+    hide(els.scopeBanner);
   } else {
     els.authDot.className = 'status-dot readonly';
-    const src =
-      s.source === 'gh-cli'
-        ? 'gh CLI'
-        : s.source === 'browser-pat'
-        ? 'Browser PAT'
-        : 'PAT';
-    els.authLabel.textContent = `@${s.viewerLogin} (${src} · Read-Only)`;
-    els.scopeBanner.classList.remove('hidden');
+    els.authLabel.textContent = `@${s.viewerLogin} (${authSourceLabel(s.source)} · Read-Only)`;
+    show(els.scopeBanner);
     els.scopeBadgeLabel.textContent = 'Missing user:follow Permission';
-    els.bannerCreateTokenLink.classList.remove('hidden');
-    els.copyGhCmdBtn.classList.toggle('hidden', !isCli);
+    show(els.bannerCreateTokenLink);
+    show(els.copyGhCmdBtn, cli);
     els.scopeBannerText.innerHTML =
       'Your token is verified, but lacks the <code>user:follow</code> permission needed to unfollow users. Click <strong>1. Generate Token</strong> to create one with <code>user:follow</code> pre-selected.';
   }
 
-  // Modal details
-  if (s && s.authenticated) {
+  if (s?.authenticated) {
     els.modalAuthSource.textContent =
       s.source === 'gh-cli'
         ? 'GitHub CLI (gh auth)'
@@ -794,315 +472,115 @@ function renderModeAndAuthUI() {
         ? 'Browser Session Token (Client-Direct)'
         : 'Custom Personal Access Token';
     els.modalAuthUser.textContent = `@${s.viewerLogin} (${s.viewerName || ''})`;
-    els.modalAuthScopes.textContent = s.isFineGrained
-      ? 'Fine-grained PAT'
-      : s.scopes && s.scopes.length > 0
-      ? s.scopes.join(', ')
-      : 'none';
-    els.modalFollowPerm.textContent = s.hasFollowScope
-      ? '✅ Enabled (Verified owner can unfollow)'
-      : '⚠️ Missing user:follow scope (Read-only)';
-    if (els.modalRepoPerm) {
-      els.modalRepoPerm.textContent = s.hasRepoScope
-        ? '✅ Enabled (Can view private repos & archive/unarchive)'
-        : '⚠️ Missing repo scope (Public repos only; cannot archive)';
-    }
-    if (els.modalDeleteRepoPerm) {
-      els.modalDeleteRepoPerm.textContent = s.hasDeleteRepoScope
-        ? '✅ Enabled (Verified owner can delete repos)'
-        : '⚠️ Missing delete_repo scope (Cannot delete repos)';
-    }
-    if (els.modalRateLimit) {
-      els.modalRateLimit.textContent = s.rateLimit?.limit
-        ? `${s.rateLimit.remaining.toLocaleString()} / ${s.rateLimit.limit.toLocaleString()} requests remaining`
-        : '5,000 requests/hr';
-    }
+    els.modalAuthScopes.textContent = s.isFineGrained ? 'Fine-grained PAT' : s.scopes?.length ? s.scopes.join(', ') : 'none';
+    els.modalFollowPerm.textContent = s.hasFollowScope ? '✅ Enabled (can unfollow and re-follow)' : '⚠️ Missing user:follow scope (Read-only)';
+    els.modalRepoPerm.textContent = s.hasRepoScope
+      ? '✅ Enabled (can view private repos and archive/unarchive)'
+      : '⚠️ Missing repo scope (public repos only; cannot archive)';
+    els.modalDeleteRepoPerm.textContent = s.hasDeleteRepoScope
+      ? '✅ Enabled (can delete repos)'
+      : '⚠️ Missing delete_repo scope (cannot delete repos)';
   } else {
     els.modalAuthSource.textContent = 'None (Public Read-Only API)';
     els.modalAuthUser.textContent = 'Not signed in';
     els.modalAuthScopes.textContent = 'none';
-    els.modalFollowPerm.textContent = '❌ Sign in with token to verify ownership & unfollow';
-    if (els.modalRepoPerm) {
-      els.modalRepoPerm.textContent = '❌ Sign in with repo token to archive repos';
-    }
-    if (els.modalDeleteRepoPerm) {
-      els.modalDeleteRepoPerm.textContent = '❌ Sign in with delete_repo token to delete repos';
-    }
-    if (els.modalRateLimit) {
-      els.modalRateLimit.textContent = '60 requests/hr (unauthenticated public limit)';
-    }
+    els.modalFollowPerm.textContent = '❌ Sign in with a token to verify ownership and unfollow';
+    els.modalRepoPerm.textContent = '❌ Sign in with a repo token to archive repos';
+    els.modalDeleteRepoPerm.textContent = '❌ Sign in with a delete_repo token to delete repos';
   }
+  renderRateLimit();
 }
 
-// Client-Side Direct Analyzer (for Cloudflare Web App Mode)
-const USER_NODE_FIELDS = `
-  login
-  name
-  avatarUrl
-  url
-  bio
-  company
-  location
-  websiteUrl
-  UpdatedAt: updatedAt
-  followers { totalCount }
-  following { totalCount }
-  repositories(privacy: PUBLIC) { totalCount }
-`;
-
-async function fetchClientGraphQLConnection(token, username, connectionName) {
-  const items = [];
-  let hasNextPage = true;
-  let afterCursor = null;
-  let pageCount = 0;
-
-  while (hasNextPage && pageCount < 50) {
-    pageCount++;
-    const query = `
-      query($login: String!, $after: String) {
-        user(login: $login) {
-          ${connectionName}(first: 100, after: $after) {
-            totalCount
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-            nodes {
-              ${USER_NODE_FIELDS}
-            }
-          }
-        }
-      }
-    `;
-
-    const res = await fetch('https://api.github.com/graphql', {
-      method: 'POST',
-      headers: {
-        ...buildGitHubHeaders(token),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query,
-        variables: { login: username, after: afterCursor },
-      }),
-    });
-
-    if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}`);
-    const payload = await res.json();
-    if (payload.errors?.length) throw new Error(payload.errors[0].message);
-
-    const conn = payload?.data?.user?.[connectionName];
-    if (!conn) throw new Error(`User '${username}' not found.`);
-
-    for (const node of conn.nodes || []) {
-      if (!node?.login) continue;
-      items.push({
-        login: node.login,
-        name: node.name || '',
-        avatarUrl: node.avatarUrl || `https://github.com/${node.login}.png`,
-        url: node.url || `https://github.com/${node.login}`,
-        bio: node.bio || '',
-        company: node.company || '',
-        location: node.location || '',
-        websiteUrl: node.websiteUrl || '',
-        updatedAt: node.UpdatedAt || null,
-        followersCount: node.followers?.totalCount ?? null,
-        followingCount: node.following?.totalCount ?? null,
-        publicReposCount: node.repositories?.totalCount ?? null,
-      });
-    }
-
-    hasNextPage = Boolean(conn.pageInfo?.hasNextPage);
-    afterCursor = conn.pageInfo?.endCursor || null;
-    if (els.loadingText) {
-      els.loadingText.textContent = `Scanning @${username}: fetched ${items.length.toLocaleString()} ${connectionName}...`;
-    }
-  }
-
-  return items;
-}
-
-async function fetchClientRestList(token, username, listType) {
-  const items = [];
-  let page = 1;
-  while (page <= 50) {
-    const url = `https://api.github.com/users/${encodeURIComponent(username)}/${listType}?per_page=100&page=${page}`;
-    const res = await fetch(url, { headers: buildGitHubHeaders(token) });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      if (res.status === 403 && (errBody.message || '').toLowerCase().includes('rate limit')) {
-        throw new Error(
-          'GitHub public IP rate limit reached (60 requests/hr for unauthenticated browsers). Connect a free GitHub token below to unlock 5,000 requests/hr instantly.'
-        );
-      }
-      throw new Error(errBody.message || `GitHub API returned ${res.status}`);
-    }
-    const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) break;
-    for (const u of data) {
-      items.push({
-        login: u.login,
-        name: '',
-        avatarUrl: u.avatar_url,
-        url: u.html_url,
-        bio: '',
-        company: '',
-        location: '',
-        websiteUrl: '',
-        updatedAt: null,
-        followersCount: null,
-        followingCount: null,
-        publicReposCount: null,
-      });
-    }
-    if (els.loadingText) {
-      els.loadingText.textContent = `Scanning @${username}: fetched ${items.length.toLocaleString()} ${listType}...`;
-    }
-    if (data.length < 100) break;
-    page++;
-  }
-  return items;
-}
-
-async function analyzeUserClientDirect(username) {
-  if (!GITHUB_USERNAME_REGEX.test(username)) {
-    throw new Error('Invalid GitHub username format.');
-  }
-
-  const token = getBrowserPat();
-  const profileRes = await fetch(
-    `https://api.github.com/users/${encodeURIComponent(username)}`,
-    { headers: buildGitHubHeaders(token) }
-  );
-  if (!profileRes.ok) {
-    const errBody = await profileRes.json().catch(() => ({}));
-    if (profileRes.status === 403 && (errBody.message || '').toLowerCase().includes('rate limit')) {
-      throw new Error(
-        'GitHub public IP rate limit reached (60 requests/hr for unauthenticated browsers). Connect a free GitHub token below to unlock 5,000 requests/hr instantly.'
-      );
-    }
-    throw new Error(
-      errBody.message || `Could not fetch user '${username}' (${profileRes.status})`
-    );
-  }
-  const profileData = await profileRes.json();
-
-  // Safeguard unauthenticated public quota on very large accounts (>2,500 combined followers + following)
-  const totalConnections = Number(profileData.followers || 0) + Number(profileData.following || 0);
-  if (!token && totalConnections > 2500) {
-    throw new Error(
-      `@${profileData.login} has ${totalConnections.toLocaleString()} combined followers/following. Scanning an account this large without a token would exhaust GitHub's 60 req/hr public IP limit. Connect a free GitHub token below to scan large accounts via GraphQL.`
-    );
-  }
-
-  let following = [];
-  let followers = [];
-  let enriched = false;
-
-  if (token) {
-    try {
-      [following, followers] = await Promise.all([
-        fetchClientGraphQLConnection(token, username, 'following'),
-        fetchClientGraphQLConnection(token, username, 'followers'),
-      ]);
-      enriched = true;
-    } catch {
-      [following, followers] = await Promise.all([
-        fetchClientRestList(token, username, 'following'),
-        fetchClientRestList(token, username, 'followers'),
-      ]);
-    }
+function renderRateLimit() {
+  const rl = state.auth?.rateLimit;
+  if (rl?.limit) {
+    const reset = rl.reset ? ` (resets ${new Date(rl.reset * 1000).toLocaleTimeString()})` : '';
+    els.modalRateLimit.textContent = `${rl.remaining.toLocaleString()} / ${rl.limit.toLocaleString()} requests remaining${reset}`;
   } else {
-    [following, followers] = await Promise.all([
-      fetchClientRestList('', username, 'following'),
-      fetchClientRestList('', username, 'followers'),
-    ]);
+    els.modalRateLimit.textContent = state.auth?.authenticated
+      ? '5,000 requests/hr'
+      : '60 requests/hr (unauthenticated public limit)';
   }
+}
 
-  const followerSet = new Set(followers.map((u) => u.login.toLowerCase()));
-  const followingSet = new Set(following.map((u) => u.login.toLowerCase()));
+async function refreshAuth() {
+  try {
+    state.auth = await state.backend.status();
+  } catch (err) {
+    state.auth = { authenticated: false, error: errorText(err) };
+  }
+  renderModeAndAuthUI();
+  return state.auth;
+}
 
-  const nonFollowers = [];
-  const mutuals = [];
+// ---------------------------------------------------------------------------
+// Loading / error states
+// ---------------------------------------------------------------------------
 
-  following.forEach((user, index) => {
-    const item = {
-      ...user,
-      followOrder: index + 1,
-      followsBack: followerSet.has(user.login.toLowerCase()),
-    };
-    if (item.followsBack) {
-      mutuals.push(item);
-    } else {
-      nonFollowers.push(item);
-    }
-  });
+function showLoading(text, { cancellable = false } = {}) {
+  els.loadingText.textContent = text;
+  els.loadingSubtext.textContent = '';
+  hide(els.loadingSubtext);
+  show(els.cancelScanBtn, cancellable);
+  show(els.loadingState);
+  hide(els.errorState);
+  hide(els.emptyState);
+  els.cardsGrid.innerHTML = '';
+}
 
-  const fans = followers
-    .filter((u) => !followingSet.has(u.login.toLowerCase()))
-    .map((user, index) => ({
-      ...user,
-      followOrder: index + 1,
-      followsBack: true,
-    }));
+function showError(title, message, { retry, tokenCta = false } = {}) {
+  hide(els.loadingState);
+  show(els.errorState);
+  els.errorTitle.textContent = title;
+  els.errorMessage.textContent = message;
+  show(els.errorAuthCtaBtn, tokenCta);
+  show(els.errorRetryBtn, Boolean(retry));
+  els.errorRetryBtn.onclick = retry || null;
+  show(els.errorActions, tokenCta || Boolean(retry));
+}
 
-  const allowlist = loadLocalAllowlist();
-
-  return {
-    analyzedAt: new Date().toISOString(),
-    enriched,
-    profile: {
-      login: profileData.login,
-      name: profileData.name || profileData.login,
-      avatarUrl: profileData.avatar_url,
-      url: profileData.html_url,
-      bio: profileData.bio || '',
-      followersCount: profileData.followers,
-      followingCount: profileData.following,
-    },
-    counts: {
-      following: following.length,
-      followers: followers.length,
-      nonFollowers: nonFollowers.length,
-      mutuals: mutuals.length,
-      fans: fans.length,
-    },
-    nonFollowers,
-    mutuals,
-    fans,
-    allowlist,
+function progressText(kindLabel) {
+  return ({ kind, fetched, total }) => {
+    const of = total ? ` of ${total.toLocaleString()}` : '';
+    els.loadingText.textContent = `${kindLabel}: fetched ${fetched.toLocaleString()}${of} ${kind}...`;
+    hide(els.loadingSubtext);
   };
 }
 
+function onLoadingRetry(info) {
+  els.loadingSubtext.textContent = retryMessage(info);
+  show(els.loadingSubtext);
+}
+
+// ---------------------------------------------------------------------------
+// Scanning
+// ---------------------------------------------------------------------------
+
 async function scanAccount(username) {
   const cleanUser = (username || '').trim().replace(/^@/, '');
-  if (!cleanUser) {
-    els.welcomeState.classList.remove('hidden');
-    return;
+  if (!cleanUser) return show(els.welcomeState);
+  if (!USERNAME_REGEX.test(cleanUser)) {
+    hide(els.welcomeState);
+    return showError('Invalid username', `"${cleanUser}" is not a valid GitHub username.`);
   }
+
+  state.scanController?.abort();
+  const controller = new AbortController();
+  state.scanController = controller;
 
   els.usernameInput.value = cleanUser;
   updateTokenCreationLinks(cleanUser);
-  els.welcomeState.classList.add('hidden');
+  hide(els.welcomeState);
   els.scanBtn.disabled = true;
   els.scanBtn.textContent = 'Scanning...';
-  els.loadingText.textContent = `Scanning @${cleanUser}'s following & followers...`;
-  els.loadingState.classList.remove('hidden');
-  els.errorState.classList.add('hidden');
-  els.emptyState.classList.add('hidden');
-  els.cardsGrid.innerHTML = '';
+  showLoading(`Scanning @${cleanUser}'s following and followers...`, { cancellable: true });
 
   try {
-    let payload;
-    if (state.runtimeMode === 'local-cli') {
-      const res = await fetch(`/api/analyze?username=${encodeURIComponent(cleanUser)}`);
-      payload = await res.json();
-      if (!res.ok) {
-        throw new Error(payload.error || `HTTP ${res.status}`);
-      }
-    } else {
-      payload = await analyzeUserClientDirect(cleanUser);
-    }
+    const payload = await state.backend.analyze(cleanUser, {
+      signal: controller.signal,
+      onProgress: progressText(`Scanning @${cleanUser}`),
+      onRetry: onLoadingRetry,
+    });
 
     state.data = payload;
     state.reposData = null;
@@ -1112,11 +590,8 @@ async function scanAccount(username) {
     state.selectedRepos.clear();
     state.lastClickedLogin = null;
     state.lastClickedRepo = null;
-    if (els.tabCountRepos) {
-      els.tabCountRepos.textContent = '-';
-    }
+    els.tabCountRepos.textContent = '-';
 
-    // Sync ?user= query param in browser URL without reloading
     try {
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.set('user', payload.profile.login);
@@ -1126,71 +601,89 @@ async function scanAccount(username) {
     }
 
     computeAndRenderSnapshotDiff(payload);
+    show(els.summarySection);
+    show(els.controlsSection);
+    hide(els.loadingState);
 
-    els.summarySection.classList.remove('hidden');
-    els.controlsSection.classList.remove('hidden');
-    els.loadingState.classList.add('hidden');
-
+    refreshAuth(); // update rate-limit readout in the background
     renderModeAndAuthUI();
     renderProfileAndStats();
+    renderUndoBanner();
     saveScanCache();
     saveWorkspaceState();
-    if (state.activeTab === 'repos') {
-      await loadAndRenderRepos();
-    } else {
-      renderUserCards();
-    }
+    if (state.activeTab === 'repos') await loadAndRenderRepos();
+    else renderUserCards();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    els.loadingState.classList.add('hidden');
-    els.errorState.classList.remove('hidden');
-    els.errorMessage.textContent = msg;
-    const needsTokenCta =
-      !state.auth?.authenticated &&
-      (msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('token'));
-    if (els.errorActions) {
-      els.errorActions.classList.toggle('hidden', !needsTokenCta);
+    if (isAbortError(err)) {
+      if (state.scanController === controller) {
+        hide(els.loadingState);
+        if (state.data) renderActiveView();
+        else show(els.welcomeState);
+        showToast('Scan cancelled', 'info');
+      }
+      return;
     }
+    const msg = errorText(err);
+    const tokenCta = !state.auth?.authenticated && /rate limit|token/i.test(msg);
+    showError('Could not complete scan', msg, { tokenCta, retry: () => scanAccount(cleanUser) });
   } finally {
-    els.scanBtn.disabled = false;
-    els.scanBtn.textContent = 'Scan Account';
-  }
-}
-
-function getAllowlistedUsersList() {
-  if (!state.data) return [];
-  const allFollowingMap = new Map();
-  for (const u of state.data.nonFollowers) {
-    allFollowingMap.set(u.login.toLowerCase(), u);
-  }
-  for (const u of state.data.mutuals) {
-    allFollowingMap.set(u.login.toLowerCase(), u);
-  }
-
-  const list = [];
-  for (const [key, entry] of Object.entries(state.allowlist)) {
-    const found = allFollowingMap.get(key);
-    if (found) {
-      list.push(found);
-    } else {
-      list.push({
-        login: entry.login || key,
-        name: entry.login || key,
-        avatarUrl: `https://github.com/${encodeURIComponent(entry.login || key)}.png`,
-        url: `https://github.com/${encodeURIComponent(entry.login || key)}`,
-        bio: entry.note || 'On your allowlist',
-        company: '',
-        location: '',
-        followersCount: null,
-        followingCount: null,
-        publicReposCount: null,
-        followOrder: 99999,
-        followsBack: false,
-      });
+    if (state.scanController === controller) {
+      state.scanController = null;
+      els.scanBtn.disabled = false;
+      els.scanBtn.textContent = 'Scan Account';
+      hide(els.cancelScanBtn);
     }
   }
-  return list;
 }
+
+async function loadAndRenderRepos(force = false) {
+  if (!state.data?.profile?.login) return;
+  const username = state.data.profile.login;
+
+  if (!force && state.reposData?.username?.toLowerCase() === username.toLowerCase()) {
+    renderProfileAndStats();
+    renderRepoCards();
+    return;
+  }
+
+  state.scanController?.abort();
+  const controller = new AbortController();
+  state.scanController = controller;
+  showLoading(`Loading repositories for @${username}...`, { cancellable: true });
+
+  try {
+    state.reposData = await state.backend.repos(username, {
+      isOwner: isViewingOwnVerifiedAccount(),
+      signal: controller.signal,
+      onProgress: progressText(`Loading @${username}`),
+      onRetry: onLoadingRetry,
+    });
+    hide(els.loadingState);
+    saveScanCache();
+    renderProfileAndStats();
+    renderRepoCards();
+  } catch (err) {
+    if (isAbortError(err)) {
+      if (state.scanController === controller) {
+        hide(els.loadingState);
+        show(els.emptyState);
+        els.emptyTitle.textContent = 'Repository loading was cancelled';
+        els.emptySubtitle.textContent = 'Click "Refresh Live" or switch tabs to try again.';
+      }
+      return;
+    }
+    showError('Could not load repositories', errorText(err), { retry: () => loadAndRenderRepos(true) });
+  } finally {
+    if (state.scanController === controller) {
+      state.scanController = null;
+      hide(els.cancelScanBtn);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 
 function renderProfileAndStats() {
   if (!state.data) return;
@@ -1202,1354 +695,642 @@ function renderProfileAndStats() {
   els.profileLink.textContent = `@${profile.login} ↗`;
   els.profileLink.href = safeHttpUrl(profile.url);
   els.profileBio.textContent = profile.bio || '';
-  els.scanModeChip.textContent = enriched
-    ? '⚡ Enriched GraphQL Scan'
-    : 'Public REST Scan';
+  els.scanModeChip.textContent = enriched ? '⚡ Enriched GraphQL Scan' : 'Public REST Scan';
 
   const isOwner = isViewingOwnVerifiedAccount();
   if (isOwner) {
     els.ownershipChip.textContent = '✅ Verified Account Owner';
     els.ownershipChip.className = 'scan-chip chip-verified';
-    els.switchToViewerBtn.classList.add('hidden');
-  } else if (state.auth?.authenticated && state.auth?.viewerLogin) {
+    hide(els.switchToViewerBtn);
+  } else if (state.auth?.authenticated && state.auth.viewerLogin) {
     els.ownershipChip.textContent = `👁 Read-Only (Not @${state.auth.viewerLogin})`;
     els.ownershipChip.className = 'scan-chip chip-foreign';
     els.switchToViewerBtn.textContent = `Switch to My Account (@${state.auth.viewerLogin})`;
-    els.switchToViewerBtn.classList.remove('hidden');
+    show(els.switchToViewerBtn);
   } else {
     els.ownershipChip.textContent = '👁 Public Read-Only View';
     els.ownershipChip.className = 'scan-chip chip-foreign';
-    els.switchToViewerBtn.classList.add('hidden');
+    hide(els.switchToViewerBtn);
   }
 
   const totalNonFollowers = nonFollowers.length;
-  const allowlistedNonFollowersCount = nonFollowers.filter((u) => isAllowlisted(u.login)).length;
-  const actionableNonFollowersCount = totalNonFollowers - allowlistedNonFollowersCount;
-  const totalAllowlistedCount = Object.keys(state.allowlist).length;
+  const allowlistedNonFollowers = nonFollowers.filter((u) => isAllowlisted(u.login)).length;
+  const actionable = totalNonFollowers - allowlistedNonFollowers;
+  const totalAllowlisted = Object.keys(state.allowlist).length;
   const totalFollowing = totalNonFollowers + mutuals.length;
   const totalFollowers = mutuals.length + fans.length;
-  const reciprocity =
-    totalFollowing > 0 ? Math.round((mutuals.length / totalFollowing) * 100) : 0;
+  const reciprocity = totalFollowing > 0 ? Math.round((mutuals.length / totalFollowing) * 100) : 0;
 
-  els.statActionable.textContent = actionableNonFollowersCount.toLocaleString();
+  els.statActionable.textContent = actionable.toLocaleString();
   els.statNonFollowersTotal.textContent =
-    allowlistedNonFollowersCount > 0
-      ? `${totalNonFollowers} total (${allowlistedNonFollowersCount} allowlisted)`
+    allowlistedNonFollowers > 0
+      ? `${totalNonFollowers} total (${allowlistedNonFollowers} allowlisted)`
       : `${totalNonFollowers} total non-followers`;
-  els.statAllowlisted.textContent = totalAllowlistedCount.toLocaleString();
+  els.statAllowlisted.textContent = totalAllowlisted.toLocaleString();
   els.statMutuals.textContent = mutuals.length.toLocaleString();
   els.statReciprocity.textContent = `${reciprocity}% reciprocity rate`;
   els.statFans.textContent = fans.length.toLocaleString();
   els.statTotals.textContent = `${totalFollowing} Following · ${totalFollowers} Followers`;
 
-  els.tabCountNonFollowers.textContent = state.showAllowlistedInNonFollowers
-    ? totalNonFollowers
-    : actionableNonFollowersCount;
-  els.tabCountAllowlist.textContent = totalAllowlistedCount;
+  els.tabCountNonFollowers.textContent = state.showAllowlistedInNonFollowers ? totalNonFollowers : actionable;
+  els.tabCountAllowlist.textContent = totalAllowlisted;
   els.tabCountMutuals.textContent = mutuals.length;
   els.tabCountFans.textContent = fans.length;
-  if (els.tabCountRepos && state.reposData) {
-    els.tabCountRepos.textContent = state.reposData.repos.length;
-  }
-  if (els.statRepos && els.statReposMeta) {
-    if (state.reposData) {
-      const reposList = state.reposData.repos;
-      const privCount = reposList.filter((r) => r.isPrivate).length;
-      const pubCount = reposList.length - privCount;
-      els.statRepos.textContent = reposList.length.toLocaleString();
-      els.statReposMeta.textContent = state.reposData.includesPrivate
-        ? `${pubCount} public · ${privCount} private`
-        : `${pubCount} public repositories`;
-    } else {
-      els.statRepos.textContent = '-';
-      els.statReposMeta.textContent = 'Click to inspect & clean up';
-    }
+
+  if (state.reposData) {
+    const repos = state.reposData.repos;
+    const priv = repos.filter((r) => r.isPrivate).length;
+    const archived = repos.filter((r) => r.isArchived).length;
+    els.tabCountRepos.textContent = repos.length;
+    els.statRepos.textContent = repos.length.toLocaleString();
+    const vis = state.reposData.includesPrivate ? `${repos.length - priv} public · ${priv} private` : `${repos.length} public`;
+    els.statReposMeta.textContent = archived ? `${vis} · ${archived} archived` : vis;
+  } else {
+    els.statRepos.textContent = '-';
+    els.statReposMeta.textContent = 'Click to inspect and clean up';
   }
 
-  els.statCards.forEach((card) => {
-    card.classList.toggle('active', card.dataset.tab === state.activeTab);
-  });
+  els.statCards.forEach((card) => card.classList.toggle('active', card.dataset.tab === state.activeTab));
   els.tabBtns.forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.tab === state.activeTab);
+    const active = btn.dataset.tab === state.activeTab;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
   });
 
   const isRepoTab = state.activeTab === 'repos';
-  els.includeAllowlistedWrap.classList.toggle('hidden', state.activeTab !== 'non-followers');
-  if (els.userPresetPills) els.userPresetPills.classList.toggle('hidden', isRepoTab);
-  if (els.repoPresetPills) els.repoPresetPills.classList.toggle('hidden', !isRepoTab);
-  if (els.userSortBox) els.userSortBox.classList.toggle('hidden', isRepoTab);
-  if (els.repoSortBox) els.repoSortBox.classList.toggle('hidden', !isRepoTab);
-  if (els.searchInput) {
-    els.searchInput.placeholder = isRepoTab
-      ? 'Filter by repository name, description, or language... (Press /)'
-      : 'Filter by username, name, bio, company, or location... (Press /)';
-  }
+  show(els.includeAllowlistedWrap, state.activeTab === 'non-followers');
+  show(els.userPresetPills, !isRepoTab);
+  show(els.repoPresetPills, isRepoTab);
+  show(els.userSortBox, !isRepoTab);
+  show(els.repoSortBox, isRepoTab);
+  els.searchInput.placeholder = isRepoTab
+    ? 'Filter by repository name, description, or language... (Press /)'
+    : 'Filter by username, name, bio, company, or location... (Press /)';
 
-  els.batchAllowlistRemoveBtn.classList.toggle('hidden', state.activeTab !== 'allowlist');
-  els.batchAllowlistAddBtn.classList.toggle('hidden', state.activeTab === 'allowlist' || isRepoTab);
-  els.batchUnfollowBtn.classList.toggle('hidden', isRepoTab);
-  if (els.batchArchiveReposBtn) {
-    els.batchArchiveReposBtn.classList.toggle(
-      'hidden',
-      !isRepoTab || state.repoPreset === 'archived'
-    );
-  }
-  if (els.batchUnarchiveReposBtn) {
-    els.batchUnarchiveReposBtn.classList.toggle(
-      'hidden',
-      !isRepoTab || state.repoPreset !== 'archived'
-    );
-  }
-  if (els.batchDeleteReposBtn) {
-    els.batchDeleteReposBtn.classList.toggle('hidden', !isRepoTab);
-  }
+  show(els.batchAllowlistRemoveBtn, state.activeTab === 'allowlist');
+  show(els.batchAllowlistAddBtn, state.activeTab !== 'allowlist' && !isRepoTab);
+  show(els.batchUnfollowBtn, !isRepoTab && state.activeTab !== 'fans');
+  show(els.batchArchiveReposBtn, isRepoTab && state.repoPreset !== 'archived');
+  show(els.batchUnarchiveReposBtn, isRepoTab && state.repoPreset === 'archived');
+  show(els.batchDeleteReposBtn, isRepoTab);
 }
 
-function getFilteredAndSortedUsers() {
-  if (!state.data) return [];
-
-  let base = [];
-  if (state.activeTab === 'non-followers') {
-    base = state.showAllowlistedInNonFollowers
-      ? [...state.data.nonFollowers]
-      : state.data.nonFollowers.filter((u) => !isAllowlisted(u.login));
-  } else if (state.activeTab === 'allowlist') {
-    base = getAllowlistedUsersList();
-  } else if (state.activeTab === 'mutuals') {
-    base = [...state.data.mutuals];
-  } else if (state.activeTab === 'fans') {
-    base = [...state.data.fans];
-  }
-
-  const q = state.searchQuery.trim().toLowerCase();
-  if (q) {
-    base = base.filter((u) => {
-      return (
-        u.login.toLowerCase().includes(q) ||
-        (u.name && u.name.toLowerCase().includes(q)) ||
-        (u.bio && u.bio.toLowerCase().includes(q)) ||
-        (u.company && u.company.toLowerCase().includes(q)) ||
-        (u.location && u.location.toLowerCase().includes(q))
-      );
-    });
-  }
-
-  if (state.preset === 'popular') {
-    base = base.filter((u) => (u.followersCount ?? 0) >= 1000);
-  } else if (state.preset === 'regular') {
-    base = base.filter((u) => u.followersCount === null || u.followersCount < 1000);
-  } else if (state.preset === 'dormant') {
-    base = base.filter((u) => isDormantUser(u));
-  } else if (state.preset === 'zero-repos') {
-    base = base.filter((u) => u.publicReposCount === 0);
-  }
-
-  base.sort((a, b) => {
-    switch (state.sortBy) {
-      case 'order-asc':
-        return (a.followOrder || 0) - (b.followOrder || 0);
-      case 'order-desc':
-        return (b.followOrder || 0) - (a.followOrder || 0);
-      case 'followers-desc':
-        return (b.followersCount ?? -1) - (a.followersCount ?? -1);
-      case 'followers-asc':
-        return (a.followersCount ?? 999999999) - (b.followersCount ?? 999999999);
-      case 'activity-asc': {
-        const tsA = a.updatedAt ? Date.parse(a.updatedAt) : 9999999999999;
-        const tsB = b.updatedAt ? Date.parse(b.updatedAt) : 9999999999999;
-        return tsA - tsB;
-      }
-      case 'repos-asc':
-        return (a.publicReposCount ?? 999999) - (b.publicReposCount ?? 999999);
-      case 'login-asc':
-        return a.login.localeCompare(b.login);
-      default:
-        return 0;
-    }
+function getVisibleUsers() {
+  const base = getUsersForTab(state.data, state.activeTab, state.allowlist, {
+    includeAllowlisted: state.showAllowlistedInNonFollowers,
   });
-
-  return base;
+  return filterAndSortUsers(base, { query: state.searchQuery, preset: state.preset, sortBy: state.sortBy });
 }
 
-function getUnshieldedPopularCreators() {
-  if (!state.data?.nonFollowers) return [];
-  return state.data.nonFollowers.filter(
-    (u) => !isAllowlisted(u.login) && (u.followersCount ?? 0) >= 1000
-  );
+function getVisibleRepos() {
+  return filterAndSortRepos(state.reposData?.repos || [], {
+    query: state.searchQuery,
+    preset: state.repoPreset,
+    sortBy: state.repoSortBy,
+  });
 }
 
-function updateSelectionToolbar(visibleUsers) {
-  const visibleLogins = visibleUsers.map((u) => u.login);
-  const selectedCount = state.selectedLogins.size;
-  const allVisibleSelected =
-    visibleLogins.length > 0 && visibleLogins.every((login) => state.selectedLogins.has(login));
-
-  els.selectAllCheckbox.checked = allVisibleSelected;
-  els.selectAllCheckbox.indeterminate =
-    !allVisibleSelected && visibleLogins.some((login) => state.selectedLogins.has(login));
-
-  if (selectedCount > 0) {
-    els.selectionSummary.textContent = `${selectedCount} selected (of ${visibleLogins.length} visible)`;
-    els.clearSelectionBtn.classList.remove('hidden');
-  } else {
-    els.selectionSummary.textContent = `Select All Visible (${visibleLogins.length})`;
-    els.clearSelectionBtn.classList.add('hidden');
-  }
-
+function updateSelectAll(visibleIds, selectedSet, noun) {
+  const selectedCount = selectedSet.size;
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedSet.has(id));
+  els.selectAllCheckbox.checked = allSelected;
+  els.selectAllCheckbox.indeterminate = !allSelected && visibleIds.some((id) => selectedSet.has(id));
+  els.selectionSummary.textContent =
+    selectedCount > 0
+      ? `${plural(selectedCount, noun)} selected (of ${visibleIds.length} visible)`
+      : `Select All Visible (${visibleIds.length})`;
+  show(els.clearSelectionBtn, selectedCount > 0);
   document.querySelectorAll('.sel-count').forEach((el) => {
     el.textContent = String(selectedCount);
   });
+  return selectedCount;
+}
 
-  if (els.autoShieldPopularBtn) {
-    const popularCreators = getUnshieldedPopularCreators();
-    const showAutoShield =
-      state.activeTab === 'non-followers' && popularCreators.length > 0;
-    els.autoShieldPopularBtn.classList.toggle('hidden', !showAutoShield);
-    if (showAutoShield) {
-      els.autoShieldPopularBtn.textContent = `✨ Auto-Shield Creators (${popularCreators.length})`;
-    }
-  }
+function updateSelectionToolbar(visibleUsers) {
+  const selectedCount = updateSelectAll(visibleUsers.map((u) => u.login), state.selectedLogins, 'user');
+
+  const creators = getUnshieldedCreators(state.data?.nonFollowers, state.allowlist);
+  const showAutoShield = state.activeTab === 'non-followers' && creators.length > 0;
+  show(els.autoShieldPopularBtn, showAutoShield);
+  if (showAutoShield) els.autoShieldPopularBtn.textContent = `✨ Auto-Shield Creators (${creators.length})`;
 
   const isOwner = isViewingOwnVerifiedAccount();
+  const busy = Boolean(state.opController);
   els.batchAllowlistAddBtn.disabled = selectedCount === 0;
   els.batchAllowlistRemoveBtn.disabled = selectedCount === 0;
-  els.batchUnfollowBtn.disabled =
-    selectedCount === 0 || state.activeTab === 'fans' || !isOwner;
-  els.batchUnfollowBtn.title = !isOwner
-    ? 'Sign in with a token matching this GitHub account to enable batch unfollowing'
-    : '';
+  els.batchUnfollowBtn.disabled = selectedCount === 0 || state.activeTab === 'fans' || !isOwner || busy;
+  els.batchUnfollowBtn.title = !isOwner ? 'Sign in with a token matching this GitHub account to enable batch unfollowing' : '';
+}
+
+function renderEmpty(title, subtitle) {
+  els.cardsGrid.innerHTML = '';
+  show(els.emptyState);
+  els.emptyTitle.textContent = title;
+  els.emptySubtitle.textContent = subtitle;
 }
 
 function renderUserCards() {
   if (!state.data) return;
-  const visibleUsers = getFilteredAndSortedUsers();
-  updateSelectionToolbar(visibleUsers);
+  hide(els.errorState);
+  const visible = getVisibleUsers();
+  updateSelectionToolbar(visible);
 
-  if (visibleUsers.length === 0) {
-    els.cardsGrid.innerHTML = '';
-    els.emptyState.classList.remove('hidden');
+  if (visible.length === 0) {
     if (state.activeTab === 'non-followers' && state.data.nonFollowers.length > 0) {
-      els.emptyTitle.textContent = 'All non-followers are either filtered out or on your Allowlist!';
-      els.emptySubtitle.textContent =
-        'Check the "Allowlist / Ignored" tab or adjust your search and filter pills above.';
+      renderEmpty(
+        'All non-followers are either filtered out or on your Allowlist!',
+        'Check the "Allowlist / Ignored" tab or adjust your search and filter pills above.'
+      );
     } else if (state.activeTab === 'allowlist') {
-      els.emptyTitle.textContent = 'Your Allowlist is currently empty';
-      els.emptySubtitle.textContent =
-        'Click "Keep (Allowlist)" on any user card to protect them from housekeeping unfollows.';
+      renderEmpty('Your Allowlist is currently empty', 'Click "Keep (Allowlist)" on any user card to protect them from housekeeping unfollows.');
     } else {
-      els.emptyTitle.textContent = 'No users match this view';
-      els.emptySubtitle.textContent = 'Try adjusting your search or filter settings.';
+      renderEmpty('No users match this view', 'Try adjusting your search or filter settings.');
     }
+    saveWorkspaceState();
     return;
   }
 
-  els.emptyState.classList.add('hidden');
-  const isOwner = isViewingOwnVerifiedAccount();
-  const signedInAsDifferentUser =
-    state.auth?.authenticated && state.auth?.viewerLogin && !isOwner;
-
-  const html = visibleUsers
-    .map((u) => {
-      const loginEsc = escapeHtml(u.login);
-      const nameEsc = escapeHtml(u.name || u.login);
-      const bioEsc = escapeHtml(u.bio || '');
-      const companyEsc = escapeHtml(u.company || '');
-      const locationEsc = escapeHtml(u.location || '');
-      const avatarEsc = escapeHtml(safeHttpUrl(u.avatarUrl));
-      const urlEsc = escapeHtml(safeHttpUrl(u.url));
-      const isSel = state.selectedLogins.has(u.login);
-      const allowlisted = isAllowlisted(u.login);
-
-      let statusBadge = '';
-      if (allowlisted) {
-        statusBadge = `<span class="badge badge-allowlisted">🛡 Allowlisted</span>`;
-      } else if (!u.followsBack) {
-        statusBadge = `<span class="badge badge-nonfollower">Not following back</span>`;
-      } else {
-        statusBadge = `<span class="badge badge-mutual">Follows back</span>`;
-      }
-
-      const creatorBadge =
-        (u.followersCount ?? 0) >= 1000
-          ? `<span class="badge badge-creator" title="Popular creator / maintainer (1,000+ followers)">⭐ Creator 1k+</span>`
-          : '';
-
-      const actInfo = formatRelativeActivity(u.updatedAt);
-      const activityBadge = actInfo
-        ? `<span class="badge ${
-            actInfo.dormant ? 'badge-dormant' : 'badge-active'
-          }" title="Last GitHub profile/repo update: ${escapeHtml(u.updatedAt)}">${escapeHtml(
-            actInfo.label
-          )}</span>`
-        : '';
-
-      const orderBadge =
-        u.followOrder && u.followOrder < 99999
-          ? `<span class="badge badge-order" title="Order in list">#${u.followOrder}</span>`
-          : '';
-
-      const metaParts = [];
-      if (companyEsc) metaParts.push(`<span>🏢 ${companyEsc}</span>`);
-      if (locationEsc) metaParts.push(`<span>📍 ${locationEsc}</span>`);
-
-      let actionButtonHtml = '';
-      if (state.activeTab === 'fans') {
-        actionButtonHtml = `<a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary">View Profile ↗</a>`;
-      } else if (isOwner) {
-        actionButtonHtml = `
-          <button
-            type="button"
-            class="btn btn-sm btn-danger"
-            data-action="unfollow-single"
-            data-login="${loginEsc}"
-          >
-            Unfollow
-          </button>`;
-      } else if (signedInAsDifferentUser) {
-        actionButtonHtml = `
-          <button
-            type="button"
-            class="btn btn-sm btn-secondary"
-            disabled
-            title="You are signed in as @${escapeHtml(
-              state.auth.viewerLogin
-            )}. You cannot unfollow on behalf of @${escapeHtml(state.data.profile.login)}."
-          >
-            🔒 Not Your Account
-          </button>`;
-      } else {
-        actionButtonHtml = `
-          <button
-            type="button"
-            class="btn btn-sm btn-secondary"
-            data-action="prompt-signin"
-            title="Verify ownership of @${escapeHtml(
-              state.data.profile.login
-            )} with a token to enable unfollowing"
-          >
-            🔑 Sign in to Unfollow
-          </button>`;
-      }
-
-      return `
-        <article class="user-card ${isSel ? 'selected' : ''} ${allowlisted ? 'allowlisted' : ''}" data-login="${loginEsc}">
-          <div>
-            <div class="card-top">
-              <div class="card-check-wrap">
-                <input
-                  type="checkbox"
-                  class="card-checkbox"
-                  data-action="toggle-select"
-                  data-login="${loginEsc}"
-                  ${isSel ? 'checked' : ''}
-                  aria-label="Select ${loginEsc}"
-                />
-              </div>
-              <img class="card-avatar" src="${avatarEsc}" alt="${loginEsc}" loading="lazy" />
-              <div class="card-identity">
-                <div class="card-title-row">
-                  <span class="card-name" title="${nameEsc}">${nameEsc}</span>
-                  ${orderBadge}
-                </div>
-                <a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="card-handle">@${loginEsc} ↗</a>
-                <div class="card-badges">
-                  ${statusBadge}
-                  ${creatorBadge}
-                  ${activityBadge}
-                </div>
-              </div>
-            </div>
-
-            ${bioEsc ? `<p class="card-bio" style="margin-top:10px;" title="${bioEsc}">${bioEsc}</p>` : ''}
-            ${
-              metaParts.length > 0
-                ? `<div class="card-meta-tags" style="margin-top:8px;">${metaParts.join('')}</div>`
-                : ''
-            }
-          </div>
-
-          <div class="card-right-group">
-            <div class="card-metrics" style="margin-bottom:10px;">
-              <div class="metric-item">
-                <span class="metric-val">${formatCount(u.followersCount)}</span>
-                <span class="metric-lbl">Followers</span>
-              </div>
-              <div class="metric-item">
-                <span class="metric-val">${formatCount(u.followingCount)}</span>
-                <span class="metric-lbl">Following</span>
-              </div>
-              <div class="metric-item">
-                <span class="metric-val">${formatCount(u.publicReposCount)}</span>
-                <span class="metric-lbl">Repos</span>
-              </div>
-            </div>
-
-            <div class="card-actions">
-              <button
-                type="button"
-                class="btn btn-sm btn-shield ${allowlisted ? 'active' : ''}"
-                data-action="toggle-allowlist"
-                data-login="${loginEsc}"
-                title="${allowlisted ? 'Remove from Allowlist' : 'Keep / Add to Allowlist'}"
-              >
-                ${allowlisted ? '🛡 Kept (Remove)' : '🛡 Keep (Allowlist)'}
-              </button>
-              ${actionButtonHtml}
-            </div>
-          </div>
-        </article>
-      `;
-    })
+  hide(els.emptyState);
+  const ctx = {
+    tab: state.activeTab,
+    isOwner: isViewingOwnVerifiedAccount(),
+    viewerLogin: state.auth?.authenticated ? state.auth.viewerLogin : null,
+    profileLogin: state.data.profile.login,
+    now: Date.now(),
+  };
+  els.cardsGrid.innerHTML = visible
+    .map((u) => userCardHtml(u, { ...ctx, selected: state.selectedLogins.has(u.login), allowlisted: isAllowlisted(u.login) }))
     .join('');
-
-  els.cardsGrid.innerHTML = html;
   saveWorkspaceState();
 }
 
-async function addToAllowlist(usernames) {
-  if (!usernames || usernames.length === 0) return;
-
-  if (state.runtimeMode === 'local-cli') {
-    const res = await fetch('/api/allowlist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ usernames }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      state.allowlist = data.allowlist || {};
-    }
-  } else {
-    const now = new Date().toISOString();
-    for (const rawLogin of usernames) {
-      const login = String(rawLogin || '').trim();
-      const lower = login.toLowerCase();
-      if (GITHUB_USERNAME_REGEX.test(login) && !FORBIDDEN_KEYS.has(lower)) {
-        state.allowlist[lower] = {
-          login,
-          note: state.allowlist[lower]?.note || '',
-          addedAt: state.allowlist[lower]?.addedAt || now,
-        };
-      }
-    }
-  }
-
-  saveLocalAllowlist(state.allowlist);
-  usernames.forEach((u) => state.selectedLogins.delete(u));
-  renderProfileAndStats();
-  renderUserCards();
-  showToast(`Added ${usernames.length} user${usernames.length === 1 ? '' : 's'} to Allowlist`);
-}
-
-async function removeFromAllowlist(usernames) {
-  if (!usernames || usernames.length === 0) return;
-
-  if (state.runtimeMode === 'local-cli') {
-    const res = await fetch('/api/allowlist', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ usernames }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      state.allowlist = data.allowlist || {};
-    }
-  } else {
-    for (const rawLogin of usernames) {
-      delete state.allowlist[String(rawLogin || '').trim().toLowerCase()];
-    }
-  }
-
-  saveLocalAllowlist(state.allowlist);
-  usernames.forEach((u) => state.selectedLogins.delete(u));
-  renderProfileAndStats();
-  renderUserCards();
-  showToast(
-    `Removed ${usernames.length} user${usernames.length === 1 ? '' : 's'} from Allowlist`
-  );
-}
-
-function openUnfollowModal(usernames) {
-  if (!isViewingOwnVerifiedAccount()) {
-    updateTokenCreationLinks();
-    els.authModal.classList.remove('hidden');
-    return;
-  }
-
-  const actionable = usernames.filter((u) => !isAllowlisted(u));
-  const skippedCount = usernames.length - actionable.length;
-
-  if (actionable.length === 0) {
-    showToast(
-      'Selected user(s) are protected by your Allowlist. Remove them from Allowlist first to unfollow.',
-      'error'
-    );
-    return;
-  }
-
-  state.pendingUnfollowLogins = actionable;
-  els.unfollowModalTitle.textContent = `Confirm Unfollow (${actionable.length} user${
-    actionable.length === 1 ? '' : 's'
-  })`;
-  els.unfollowModalDesc.textContent =
-    skippedCount > 0
-      ? `You are about to unfollow ${actionable.length} user(s) from @${state.auth.viewerLogin}. (${skippedCount} allowlisted user(s) were automatically excluded.)`
-      : `You are about to unfollow ${actionable.length} GitHub user${
-          actionable.length === 1 ? '' : 's'
-        } from @${state.auth.viewerLogin}. Requests are paced serially (300ms apart) to respect GitHub rate limits.`;
-
-  els.unfollowPreviewList.innerHTML = actionable
-    .map((login) => `<span class="preview-chip">@${escapeHtml(login)}</span>`)
-    .join('');
-
-  els.unfollowProgressWrap.classList.add('hidden');
-  els.unfollowModalError.classList.add('hidden');
-  els.confirmUnfollowBtn.disabled = false;
-  els.confirmUnfollowBtn.textContent = `Unfollow ${actionable.length} User${
-    actionable.length === 1 ? '' : 's'
-  }`;
-  els.unfollowModal.classList.remove('hidden');
-}
-
-function closeUnfollowModal() {
-  els.unfollowModal.classList.add('hidden');
-  state.pendingUnfollowLogins = [];
-}
-
-function showMissingScopeErrorInModal() {
-  const isCli = state.runtimeMode === 'local-cli';
-  els.unfollowProgressWrap.classList.add('hidden');
-  els.unfollowModalError.classList.remove('hidden');
-  els.unfollowModalError.innerHTML = isCli
-    ? `<strong>Missing <code>user:follow</code> permission scope.</strong><br/>
-       Run <code>gh auth refresh -h github.com -s user:follow</code> in your terminal or click
-       <button type="button" id="inline-open-auth-btn" class="btn-link">Auth Settings</button> to generate a token in 1 click.`
-    : `<strong>Authentication with <code>user:follow</code> scope required.</strong><br/>
-       Click <button type="button" id="inline-open-auth-btn" class="btn-link">Easy Token Creator</button> to generate a token with <code>user:follow</code> pre-selected.`;
-
-  const inlineBtn = document.getElementById('inline-open-auth-btn');
-  if (inlineBtn) {
-    inlineBtn.addEventListener('click', () => {
-      closeUnfollowModal();
-      updateTokenCreationLinks();
-      els.authModal.classList.remove('hidden');
-    });
-  }
-  els.confirmUnfollowBtn.disabled = false;
-}
-
-async function executePendingUnfollow() {
-  const logins = [...state.pendingUnfollowLogins];
-  if (logins.length === 0) return;
-
-  els.confirmUnfollowBtn.disabled = true;
-  els.unfollowModalError.classList.add('hidden');
-  els.unfollowProgressWrap.classList.remove('hidden');
-  els.unfollowProgressBar.style.width = '8%';
-  els.unfollowProgressText.textContent = `Unfollowing ${logins.length} user(s) with serial pacing...`;
-
-  const unfollowedSet = new Set();
-
-  if (state.runtimeMode === 'local-cli') {
-    const chunkSize = 5;
-    for (let i = 0; i < logins.length; i += chunkSize) {
-      const batch = logins.slice(i, i + chunkSize);
-      const res = await fetch('/api/unfollow', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernames: batch }),
-      });
-      const payload = await res.json();
-
-      if (!res.ok) {
-        if (payload.code === 'MISSING_FOLLOW_SCOPE' || payload.code === 'NO_TOKEN') {
-          showMissingScopeErrorInModal();
-        } else {
-          els.unfollowProgressWrap.classList.add('hidden');
-          els.unfollowModalError.classList.remove('hidden');
-          els.unfollowModalError.textContent = payload.error || 'Failed to unfollow users.';
-          els.confirmUnfollowBtn.disabled = false;
-        }
-        return;
-      }
-
-      for (const login of payload.succeeded || []) {
-        unfollowedSet.add(login.toLowerCase());
-        state.selectedLogins.delete(login);
-      }
-
-      const pct = Math.min(100, Math.round(((i + batch.length) / logins.length) * 100));
-      els.unfollowProgressBar.style.width = `${pct}%`;
-      els.unfollowProgressText.textContent = `Unfollowed ${unfollowedSet.size} of ${logins.length}...`;
-    }
-  } else {
-    const token = getBrowserPat();
-    if (!token) {
-      showMissingScopeErrorInModal();
-      return;
-    }
-
-    for (let i = 0; i < logins.length; i++) {
-      const login = logins[i];
-      if (i > 0) {
-        await sleep(UNFOLLOW_DELAY_MS);
-      }
-
-      const res = await fetch(
-        `https://api.github.com/user/following/${encodeURIComponent(login)}`,
-        {
-          method: 'DELETE',
-          headers: buildGitHubHeaders(token),
-        }
-      );
-
-      if (res.status === 204) {
-        unfollowedSet.add(login.toLowerCase());
-        state.selectedLogins.delete(login);
-      } else {
-        const currentScopes = res.headers.get('x-oauth-scopes') || '';
-        if (
-          (res.status === 404 || res.status === 403 || res.status === 401) &&
-          !currentScopes.includes('user:follow') &&
-          !currentScopes.includes('user')
-        ) {
-          showMissingScopeErrorInModal();
-          return;
-        }
-      }
-
-      const pct = Math.min(100, Math.round(((i + 1) / logins.length) * 100));
-      els.unfollowProgressBar.style.width = `${pct}%`;
-      els.unfollowProgressText.textContent = `Unfollowed ${unfollowedSet.size} of ${logins.length}...`;
-    }
-  }
-
-  if (state.data && unfollowedSet.size > 0) {
-    state.data.nonFollowers = state.data.nonFollowers.filter(
-      (u) => !unfollowedSet.has(u.login.toLowerCase())
-    );
-    state.data.mutuals = state.data.mutuals.filter(
-      (u) => !unfollowedSet.has(u.login.toLowerCase())
-    );
-  }
-
-  closeUnfollowModal();
-  renderProfileAndStats();
-  renderUserCards();
-  showToast(
-    `Successfully unfollowed ${unfollowedSet.size} user${unfollowedSet.size === 1 ? '' : 's'}!`
-  );
-}
-
-// ==========================================
-// Repository Housekeeping (List & Mass Delete)
-// ==========================================
-
-function formatSizeKb(kb) {
-  if (!kb || kb <= 0) return '0 KB';
-  if (kb >= 1024 * 1024) return `${(kb / (1024 * 1024)).toFixed(2)} GB`;
-  if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`;
-  return `${kb} KB`;
-}
-
-function isDormantRepo(repo) {
-  const ref = repo?.pushedAt || repo?.updatedAt;
-  if (!ref) return false;
-  const ts = Date.parse(ref);
-  if (Number.isNaN(ts)) return false;
-  return Date.now() - ts > ONE_YEAR_MS;
-}
-
-async function fetchClientReposDirect(username) {
-  const token = getBrowserPat();
-  const isOwner =
-    state.auth?.authenticated &&
-    state.auth?.viewerLogin &&
-    state.auth.viewerLogin.toLowerCase() === username.toLowerCase();
-
-  const repos = [];
-  let page = 1;
-  while (page <= 30) {
-    const endpoint = isOwner
-      ? `https://api.github.com/user/repos?per_page=100&affiliation=owner&sort=updated&page=${page}`
-      : `https://api.github.com/users/${encodeURIComponent(
-          username
-        )}/repos?per_page=100&type=owner&sort=updated&page=${page}`;
-
-    const res = await fetch(endpoint, { headers: buildGitHubHeaders(token) });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.message || `GitHub API returned ${res.status}`);
-    }
-    const batch = await res.json();
-    if (!Array.isArray(batch) || batch.length === 0) break;
-
-    for (const r of batch) {
-      repos.push({
-        id: r.id,
-        name: r.name,
-        fullName: r.full_name,
-        owner: r.owner?.login || username,
-        htmlUrl: r.html_url,
-        description: r.description || '',
-        isPrivate: Boolean(r.private),
-        isFork: Boolean(r.fork),
-        isArchived: Boolean(r.archived),
-        language: r.language || '',
-        stargazersCount: Number(r.stargazers_count || 0),
-        forksCount: Number(r.forks_count || 0),
-        openIssuesCount: Number(r.open_issues_count || 0),
-        sizeKb: Number(r.size || 0),
-        pushedAt: r.pushed_at || r.updated_at || null,
-        updatedAt: r.updated_at || null,
-        createdAt: r.created_at || null,
-      });
-    }
-
-    if (batch.length < 100) break;
-    page++;
-  }
-
-  return {
-    username,
-    includesPrivate: Boolean(isOwner),
-    count: repos.length,
-    repos,
-  };
-}
-
-async function loadAndRenderRepos(force = false) {
-  if (!state.data?.profile?.login) return;
-  const username = state.data.profile.login;
-
-  if (!force && state.reposData && state.reposData.username.toLowerCase() === username.toLowerCase()) {
-    renderProfileAndStats();
-    renderRepoCards();
-    return;
-  }
-
-  state.reposLoading = true;
-  els.loadingText.textContent = `Loading repositories for @${username}...`;
-  els.loadingState.classList.remove('hidden');
-  els.emptyState.classList.add('hidden');
-  els.errorState.classList.add('hidden');
-  els.cardsGrid.innerHTML = '';
-
-  try {
-    let payload;
-    if (state.runtimeMode === 'local-cli') {
-      const res = await fetch(`/api/repos?username=${encodeURIComponent(username)}`);
-      payload = await res.json();
-      if (!res.ok) {
-        throw new Error(payload.error || `HTTP ${res.status}`);
-      }
-    } else {
-      payload = await fetchClientReposDirect(username);
-    }
-
-    state.reposData = payload;
-    els.loadingState.classList.add('hidden');
-    saveScanCache();
-    renderProfileAndStats();
-    renderRepoCards();
-  } catch (err) {
-    els.loadingState.classList.add('hidden');
-    els.errorState.classList.remove('hidden');
-    els.errorMessage.textContent = err instanceof Error ? err.message : String(err);
-  } finally {
-    state.reposLoading = false;
-  }
-}
-
-function getFilteredAndSortedRepos() {
-  if (!state.reposData?.repos) return [];
-  let base = [...state.reposData.repos];
-
-  const q = state.searchQuery.trim().toLowerCase();
-  if (q) {
-    base = base.filter(
-      (r) =>
-        r.name.toLowerCase().includes(q) ||
-        r.fullName.toLowerCase().includes(q) ||
-        (r.description && r.description.toLowerCase().includes(q)) ||
-        (r.language && r.language.toLowerCase().includes(q))
-    );
-  }
-
-  if (state.repoPreset === 'forks') {
-    base = base.filter((r) => r.isFork);
-  } else if (state.repoPreset === 'private') {
-    base = base.filter((r) => r.isPrivate);
-  } else if (state.repoPreset === 'public') {
-    base = base.filter((r) => !r.isPrivate);
-  } else if (state.repoPreset === 'archived') {
-    base = base.filter((r) => r.isArchived);
-  } else if (state.repoPreset === 'dormant') {
-    base = base.filter((r) => isDormantRepo(r));
-  } else if (state.repoPreset === 'zero-stars') {
-    base = base.filter((r) => r.stargazersCount === 0);
-  }
-
-  base.sort((a, b) => {
-    switch (state.repoSortBy) {
-      case 'pushed-desc':
-        return Date.parse(b.pushedAt || 0) - Date.parse(a.pushedAt || 0);
-      case 'pushed-asc':
-        return Date.parse(a.pushedAt || 0) - Date.parse(b.pushedAt || 0);
-      case 'stars-asc':
-        return a.stargazersCount - b.stargazersCount;
-      case 'stars-desc':
-        return b.stargazersCount - a.stargazersCount;
-      case 'size-desc':
-        return b.sizeKb - a.sizeKb;
-      case 'name-asc':
-        return a.name.localeCompare(b.name);
-      default:
-        return 0;
-    }
-  });
-
-  return base;
-}
-
 function updateRepoSelectionToolbar(visibleRepos) {
-  const visibleNames = visibleRepos.map((r) => r.fullName);
-  const selectedCount = state.selectedRepos.size;
-  const allVisibleSelected =
-    visibleNames.length > 0 && visibleNames.every((name) => state.selectedRepos.has(name));
-
-  els.selectAllCheckbox.checked = allVisibleSelected;
-  els.selectAllCheckbox.indeterminate =
-    !allVisibleSelected && visibleNames.some((name) => state.selectedRepos.has(name));
-
-  if (selectedCount > 0) {
-    els.selectionSummary.textContent = `${selectedCount} repo${
-      selectedCount === 1 ? '' : 's'
-    } selected (of ${visibleNames.length} visible)`;
-    els.clearSelectionBtn.classList.remove('hidden');
-  } else {
-    els.selectionSummary.textContent = `Select All Visible (${visibleNames.length})`;
-    els.clearSelectionBtn.classList.add('hidden');
-  }
-
-  document.querySelectorAll('.sel-count').forEach((el) => {
-    el.textContent = String(selectedCount);
-  });
-
-  if (els.autoShieldPopularBtn) {
-    els.autoShieldPopularBtn.classList.add('hidden');
-  }
-
+  const selectedCount = updateSelectAll(visibleRepos.map((r) => r.fullName), state.selectedRepos, 'repo');
+  hide(els.autoShieldPopularBtn);
   const isOwner = isViewingOwnVerifiedAccount();
-  if (els.batchArchiveReposBtn) {
-    els.batchArchiveReposBtn.classList.toggle('hidden', state.repoPreset === 'archived');
-    els.batchArchiveReposBtn.disabled = selectedCount === 0 || !isOwner;
-  }
-  if (els.batchUnarchiveReposBtn) {
-    els.batchUnarchiveReposBtn.classList.toggle('hidden', state.repoPreset !== 'archived');
-    els.batchUnarchiveReposBtn.disabled = selectedCount === 0 || !isOwner;
-  }
-  if (els.batchDeleteReposBtn) {
-    els.batchDeleteReposBtn.disabled = selectedCount === 0 || !isOwner;
-    els.batchDeleteReposBtn.title = !isOwner
-      ? 'Sign in with a token matching this GitHub account (with delete_repo scope) to delete repositories'
-      : '';
-  }
-}
-
-const LANG_COLORS = {
-  TypeScript: '#3178c6',
-  JavaScript: '#f1e05a',
-  Python: '#3572A5',
-  Go: '#00ADD8',
-  Rust: '#dea584',
-  HTML: '#e34c26',
-  CSS: '#563d7c',
-  Java: '#b07219',
-  'C#': '#178600',
-  'C++': '#f34b7d',
-  C: '#555555',
-  Shell: '#89e051',
-  Dart: '#00B4AB',
-  Swift: '#F05138',
-  Kotlin: '#A97BFF',
-  PHP: '#4F5D95',
-  Ruby: '#701516',
-  Vue: '#41b883',
-};
-
-function getLanguageColor(lang) {
-  return LANG_COLORS[lang] || '#8b949e';
+  const disabled = selectedCount === 0 || !isOwner || Boolean(state.opController);
+  els.batchArchiveReposBtn.disabled = disabled;
+  els.batchUnarchiveReposBtn.disabled = disabled;
+  els.batchDeleteReposBtn.disabled = disabled;
+  els.batchDeleteReposBtn.title = !isOwner
+    ? 'Sign in with a token matching this GitHub account (with delete_repo scope) to delete repositories'
+    : '';
 }
 
 function renderRepoCards() {
   if (!state.reposData) return;
-  const visibleRepos = getFilteredAndSortedRepos();
-  updateRepoSelectionToolbar(visibleRepos);
+  hide(els.errorState);
+  const visible = getVisibleRepos();
+  updateRepoSelectionToolbar(visible);
 
-  if (visibleRepos.length === 0) {
-    els.cardsGrid.innerHTML = '';
-    els.emptyState.classList.remove('hidden');
-    els.emptyTitle.textContent = 'No repositories match this view';
-    els.emptySubtitle.textContent = 'Try adjusting your search or repository filter pills.';
+  if (visible.length === 0) {
+    renderEmpty('No repositories match this view', 'Try adjusting your search or repository filter pills.');
+    saveWorkspaceState();
     return;
   }
 
-  els.emptyState.classList.add('hidden');
-  const isOwner = isViewingOwnVerifiedAccount();
-  const signedInAsDifferentUser =
-    state.auth?.authenticated && state.auth?.viewerLogin && !isOwner;
-
-  const html = visibleRepos
-    .map((r) => {
-      const fullEsc = escapeHtml(r.fullName);
-      const nameEsc = escapeHtml(r.name);
-      const descEsc = escapeHtml(r.description || '');
-      const urlEsc = escapeHtml(safeHttpUrl(r.htmlUrl));
-      const langEsc = escapeHtml(r.language || '');
-      const isSel = state.selectedRepos.has(r.fullName);
-      const actInfo = formatRelativeActivity(r.pushedAt);
-
-      const visBadge = r.isPrivate
-        ? `<span class="badge badge-private">🔒 Private</span>`
-        : `<span class="badge badge-public">🌐 Public</span>`;
-      const forkBadge = r.isFork ? `<span class="badge badge-fork">⑂ Fork</span>` : '';
-      const archBadge = r.isArchived ? `<span class="badge badge-archived">📦 Archived</span>` : '';
-      const activityBadge = actInfo
-        ? `<span class="badge ${actInfo.dormant ? 'badge-dormant' : 'badge-active'}">${escapeHtml(
-            actInfo.label
-          )}</span>`
-        : '';
-
-      const metaParts = [];
-      if (langEsc) {
-        const langColor = getLanguageColor(r.language);
-        metaParts.push(
-          `<span><span class="lang-dot" style="background-color:${langColor};"></span>${langEsc}</span>`
-        );
-      }
-      metaParts.push(`<span>💾 ${formatSizeKb(r.sizeKb)}</span>`);
-
-      let actionButtonHtml = '';
-      if (isOwner) {
-        actionButtonHtml = `
-          <button
-            type="button"
-            class="btn btn-sm btn-secondary"
-            data-action="toggle-repo-archive"
-            data-repo="${fullEsc}"
-            data-archived="${r.isArchived ? 'true' : 'false'}"
-            title="${r.isArchived ? 'Unarchive repository' : 'Make read-only (reversible)'}"
-          >
-            ${r.isArchived ? 'Unarchive' : '📦 Archive'}
-          </button>
-          <button
-            type="button"
-            class="btn btn-sm btn-danger"
-            data-action="delete-repo-single"
-            data-repo="${fullEsc}"
-          >
-            🗑 Delete
-          </button>`;
-      } else if (signedInAsDifferentUser) {
-        actionButtonHtml = `
-          <button type="button" class="btn btn-sm btn-secondary" disabled>
-            🔒 Not Your Account
-          </button>`;
-      } else {
-        actionButtonHtml = `
-          <button type="button" class="btn btn-sm btn-secondary" data-action="prompt-signin">
-            🔑 Sign in to Delete
-          </button>`;
-      }
-
-      return `
-        <article class="user-card ${isSel ? 'selected' : ''}" data-repo="${fullEsc}">
-          <div>
-            <div class="card-top">
-              <div class="card-check-wrap">
-                <input
-                  type="checkbox"
-                  class="card-checkbox"
-                  data-action="toggle-repo-select"
-                  data-repo="${fullEsc}"
-                  ${isSel ? 'checked' : ''}
-                  aria-label="Select ${fullEsc}"
-                />
-              </div>
-              <div class="card-identity">
-                <div class="card-title-row">
-                  <span class="card-name" title="${fullEsc}">${nameEsc}</span>
-                </div>
-                <a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="card-handle">${fullEsc} ↗</a>
-                <div class="card-badges">
-                  ${visBadge}
-                  ${forkBadge}
-                  ${archBadge}
-                  ${activityBadge}
-                </div>
-              </div>
-            </div>
-
-            ${
-              descEsc
-                ? `<p class="card-bio" style="margin-top:10px;" title="${descEsc}">${descEsc}</p>`
-                : `<p class="card-bio card-bio-empty" style="margin-top:10px;">No description provided</p>`
-            }
-            <div class="card-meta-tags" style="margin-top:8px;">${metaParts.join('')}</div>
-          </div>
-
-          <div class="card-right-group">
-            <div class="card-metrics" style="margin-bottom:10px;">
-              <div class="metric-item">
-                <span class="metric-val">${formatCount(r.stargazersCount)}</span>
-                <span class="metric-lbl">Stars</span>
-              </div>
-              <div class="metric-item">
-                <span class="metric-val">${formatCount(r.forksCount)}</span>
-                <span class="metric-lbl">Forks</span>
-              </div>
-              <div class="metric-item">
-                <span class="metric-val">${formatSizeKb(r.sizeKb)}</span>
-                <span class="metric-lbl">Size</span>
-              </div>
-            </div>
-
-            <div class="card-actions">
-              <a href="${urlEsc}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary">
-                View ↗
-              </a>
-              ${actionButtonHtml}
-            </div>
-          </div>
-        </article>
-      `;
-    })
+  hide(els.emptyState);
+  const ctx = {
+    isOwner: isViewingOwnVerifiedAccount(),
+    viewerLogin: state.auth?.authenticated ? state.auth.viewerLogin : null,
+    now: Date.now(),
+  };
+  els.cardsGrid.innerHTML = visible
+    .map((r) => repoCardHtml(r, { ...ctx, selected: state.selectedRepos.has(r.fullName) }))
     .join('');
-
-  els.cardsGrid.innerHTML = html;
   saveWorkspaceState();
 }
 
-function openDeleteRepoModal(repoFullNames) {
-  if (!isViewingOwnVerifiedAccount()) {
-    updateTokenCreationLinks();
-    els.authModal.classList.remove('hidden');
+function renderActiveView() {
+  if (state.activeTab === 'repos') loadAndRenderRepos();
+  else renderUserCards();
+}
+
+function rerenderCurrent() {
+  renderProfileAndStats();
+  if (state.activeTab === 'repos') renderRepoCards();
+  else renderUserCards();
+}
+
+// ---------------------------------------------------------------------------
+// Allowlist
+// ---------------------------------------------------------------------------
+
+async function updateAllowlist(usernames, add) {
+  if (!usernames?.length) return;
+  try {
+    state.allowlist = add
+      ? await state.backend.allowlistAdd(state.allowlist, usernames)
+      : await state.backend.allowlistRemove(state.allowlist, usernames);
+    if (state.data) state.data.allowlist = state.allowlist;
+    usernames.forEach((u) => state.selectedLogins.delete(u));
+    saveScanCache();
+    rerenderCurrent();
+    showToast(`${add ? 'Added' : 'Removed'} ${plural(usernames.length, 'user')} ${add ? 'to' : 'from'} Allowlist`);
+  } catch (err) {
+    showToast(`Could not update allowlist: ${errorText(err)}`, 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Batch operations (shared progress/stop handling)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs a backend mutation and reports progress through `ui`:
+ *   ui.progress(done, total, okCount) and ui.retry(message)
+ */
+async function runMutation(kind, items, ui) {
+  const controller = new AbortController();
+  state.opController = controller;
+  try {
+    return await state.backend.mutate(kind, items, {
+      signal: controller.signal,
+      viewerLogin: state.auth?.viewerLogin,
+      onRetry: (info) => ui.retry(retryMessage(info)),
+      onProgress: ({ done, total, results }) => ui.progress(done, total, results.filter((r) => r.ok).length),
+    });
+  } finally {
+    state.opController = null;
+  }
+}
+
+function stopCurrentOperation() {
+  state.opController?.abort();
+}
+
+function setModalProgress(barEl, textEl, done, total, text) {
+  barEl.style.width = `${total ? Math.max(4, Math.round((done / total) * 100)) : 4}%`;
+  textEl.textContent = text;
+}
+
+function summarizeFailures(results) {
+  const failed = results.filter((r) => !r.ok && !r.skipped);
+  if (!failed.length) return '';
+  const sample = failed
+    .slice(0, 3)
+    .map((r) => `${r.item}: ${r.error || 'failed'}`)
+    .join('; ');
+  return ` ${plural(failed.length, 'item')} failed (${sample}${failed.length > 3 ? '; ...' : ''}).`;
+}
+
+function showScopeError(errorEl, { scope, ghScope, onOpenAuth }) {
+  const cli = isCli();
+  errorEl.innerHTML = cli
+    ? `<strong>Missing <code>${escapeHtml(scope)}</code> permission.</strong><br/>
+       Run <code>gh auth refresh -h github.com -s ${escapeHtml(ghScope)}</code> in your terminal or open
+       <button type="button" class="btn-link" data-open-auth>Auth Settings</button> to paste a token.`
+    : `<strong>A token with <code>${escapeHtml(scope)}</code> permission is required.</strong><br/>
+       Open <button type="button" class="btn-link" data-open-auth>Auth Settings</button> to generate one with the scope pre-selected.`;
+  errorEl.querySelector('[data-open-auth]')?.addEventListener('click', onOpenAuth);
+  show(errorEl);
+}
+
+// ---------------------------------------------------------------------------
+// Unfollow (+ undo via re-follow)
+// ---------------------------------------------------------------------------
+
+function undoKey() {
+  return `${KEYS.undoPrefix}${String(state.auth?.viewerLogin || '').toLowerCase()}`;
+}
+
+function getUndoBatch() {
+  if (!state.auth?.viewerLogin) return null;
+  const batch = local.getJson(undoKey());
+  if (!batch || !Array.isArray(batch.logins) || batch.logins.length === 0) return null;
+  if (Date.now() - Date.parse(batch.at || 0) > UNDO_MAX_AGE_MS) return null;
+  return batch;
+}
+
+function renderUndoBanner() {
+  const batch = isViewingOwnVerifiedAccount() ? getUndoBatch() : null;
+  if (!batch) return hide(els.undoBanner);
+  const when = new Date(batch.at).toLocaleString();
+  els.undoBannerText.textContent = `You unfollowed ${plural(batch.logins.length, 'account')} on ${when}.`;
+  els.undoRefollowBtn.textContent = `↩ Re-follow ${batch.logins.length}`;
+  els.undoRefollowBtn.disabled = Boolean(state.opController);
+  show(els.undoBanner);
+}
+
+function openUnfollowModal(usernames) {
+  if (!isViewingOwnVerifiedAccount()) return openAuthModal();
+  const actionable = usernames.filter((u) => !isAllowlisted(u));
+  const skipped = usernames.length - actionable.length;
+  if (actionable.length === 0) {
+    showToast('Selected user(s) are protected by your Allowlist. Remove them from the Allowlist first.', 'error');
     return;
   }
-  if (!repoFullNames || repoFullNames.length === 0) return;
+
+  state.pendingUnfollowLogins = actionable;
+  els.unfollowModalTitle.textContent = `Confirm Unfollow (${plural(actionable.length, 'user')})`;
+  els.unfollowModalDesc.textContent =
+    `You are about to unfollow ${plural(actionable.length, 'user')} from @${state.auth.viewerLogin}.` +
+    (skipped ? ` ${skipped} allowlisted user(s) were excluded.` : '') +
+    ' Requests are paced one at a time, and you can undo this with "Re-follow" afterwards.';
+  els.unfollowPreviewList.innerHTML = actionable.map(userChipHtml).join('');
+  hide(els.unfollowProgressWrap);
+  hide(els.unfollowModalError);
+  els.confirmUnfollowBtn.disabled = false;
+  show(els.confirmUnfollowBtn);
+  els.confirmUnfollowBtn.textContent = `Unfollow ${plural(actionable.length, 'User')}`;
+  els.cancelUnfollowBtn.textContent = 'Cancel';
+  show(els.unfollowModal);
+  els.confirmUnfollowBtn.focus();
+}
+
+function closeUnfollowModal() {
+  if (state.opController) return stopCurrentOperation();
+  hide(els.unfollowModal);
+  state.pendingUnfollowLogins = [];
+}
+
+async function executePendingUnfollow() {
+  const logins = [...state.pendingUnfollowLogins];
+  if (logins.length === 0 || state.opController) return;
+
+  els.confirmUnfollowBtn.disabled = true;
+  els.cancelUnfollowBtn.textContent = '■ Stop';
+  hide(els.unfollowModalError);
+  show(els.unfollowProgressWrap);
+  setModalProgress(els.unfollowProgressBar, els.unfollowProgressText, 0, logins.length, `Unfollowing ${plural(logins.length, 'user')}...`);
+
+  const outcome = await runMutation('unfollow', logins, {
+    progress: (done, total, ok) =>
+      setModalProgress(els.unfollowProgressBar, els.unfollowProgressText, done, total, `Unfollowed ${ok} of ${total}...`),
+    retry: (msg) => {
+      els.unfollowProgressText.textContent = msg;
+    },
+  });
+
+  els.cancelUnfollowBtn.textContent = 'Close';
+  const succeeded = outcome.results.filter((r) => r.ok).map((r) => r.item);
+  applyUnfollowed(succeeded);
+
+  if (succeeded.length) {
+    local.setJson(undoKey(), { at: new Date().toISOString(), logins: succeeded });
+    renderUndoBanner();
+  }
+
+  if (outcome.stoppedForScope) {
+    hide(els.unfollowProgressWrap);
+    showScopeError(els.unfollowModalError, {
+      scope: 'user:follow',
+      ghScope: 'user:follow',
+      onOpenAuth: () => {
+        closeUnfollowModal();
+        openAuthModal();
+      },
+    });
+    return;
+  }
+
+  const failures = summarizeFailures(outcome.results);
+  if (outcome.aborted || failures) {
+    els.unfollowProgressText.textContent =
+      `${outcome.aborted ? 'Stopped. ' : ''}Unfollowed ${succeeded.length} of ${logins.length}.` + failures;
+    hide(els.confirmUnfollowBtn);
+    return;
+  }
+
+  hide(els.unfollowModal);
+  state.pendingUnfollowLogins = [];
+  showToast(`Unfollowed ${plural(succeeded.length, 'user')}`, 'success', {
+    action: 'Undo',
+    onAction: () => refollowLastBatch(),
+    duration: 8000,
+  });
+}
+
+function applyUnfollowed(logins) {
+  if (!logins.length) return;
+  const gone = new Set(logins.map((l) => l.toLowerCase()));
+  logins.forEach((l) => state.selectedLogins.delete(l));
+  if (state.data) {
+    state.data.nonFollowers = state.data.nonFollowers.filter((u) => !gone.has(u.login.toLowerCase()));
+    // Unfollowed mutuals still follow you, so they move to "Followers You Don't Follow"
+    const nowFans = state.data.mutuals.filter((u) => gone.has(u.login.toLowerCase()));
+    state.data.mutuals = state.data.mutuals.filter((u) => !gone.has(u.login.toLowerCase()));
+    state.data.fans = [...nowFans, ...state.data.fans];
+    saveScanCache();
+  }
+  rerenderCurrent();
+}
+
+/** Activity bar: inline progress + Stop for operations without a modal. */
+function startActivity(text) {
+  els.activityText.textContent = text;
+  els.activityProgressBar.style.width = '4%';
+  els.activityStopBtn.disabled = false;
+  show(els.activityBar);
+  return {
+    progress: (done, total, ok, label) => {
+      els.activityProgressBar.style.width = `${Math.max(4, Math.round((done / total) * 100))}%`;
+      els.activityText.textContent = `${label} ${ok} of ${total}...`;
+    },
+    retry: (msg) => {
+      els.activityText.textContent = msg;
+    },
+    end: () => hide(els.activityBar),
+  };
+}
+
+async function refollowLastBatch() {
+  const batch = getUndoBatch();
+  if (!batch || state.opController) return;
+  if (!isViewingOwnVerifiedAccount()) return openAuthModal();
+
+  const activity = startActivity(`Re-following ${plural(batch.logins.length, 'account')}...`);
+  els.undoRefollowBtn.disabled = true;
+  let outcome;
+  try {
+    outcome = await runMutation('follow', batch.logins, {
+      progress: (done, total, ok) => activity.progress(done, total, ok, 'Re-followed'),
+      retry: activity.retry,
+    });
+  } finally {
+    activity.end();
+  }
+
+  const succeeded = new Set(outcome.results.filter((r) => r.ok).map((r) => r.item.toLowerCase()));
+  const remaining = batch.logins.filter((l) => !succeeded.has(l.toLowerCase()));
+  if (remaining.length) local.setJson(undoKey(), { ...batch, logins: remaining });
+  else local.remove(undoKey());
+  renderUndoBanner();
+
+  if (outcome.stoppedForScope) {
+    showToast('Your token is missing the user:follow scope needed to re-follow.', 'error');
+    return openAuthModal();
+  }
+  const failures = summarizeFailures(outcome.results);
+  showToast(
+    `${outcome.aborted ? 'Stopped. ' : ''}Re-followed ${succeeded.size} of ${batch.logins.length}.${failures}` +
+      (succeeded.size ? ' Click "Refresh Live" to update the lists.' : ''),
+    failures || outcome.aborted ? 'error' : 'success',
+    { duration: 7000 }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Repository delete / archive
+// ---------------------------------------------------------------------------
+
+function openDeleteRepoModal(repoFullNames) {
+  if (!isViewingOwnVerifiedAccount()) return openAuthModal();
+  if (!repoFullNames?.length) return;
 
   state.pendingDeleteRepos = [...repoFullNames];
   const repoMap = new Map((state.reposData?.repos || []).map((r) => [r.fullName, r]));
+  const n = repoFullNames.length;
+  const noun = n === 1 ? 'Repository' : 'Repositories';
 
-  els.deleteRepoModalTitle.textContent = `Permanently Delete ${repoFullNames.length} Repositor${
-    repoFullNames.length === 1 ? 'y' : 'ies'
-  }`;
-  els.deleteRepoModalDesc.textContent = `You are about to permanently delete ${
-    repoFullNames.length
-  } repositor${
-    repoFullNames.length === 1 ? 'y' : 'ies'
-  } from @${state.auth.viewerLogin}. This cannot be undone.`;
-
-  els.deleteRepoPreviewList.innerHTML = repoFullNames
-    .map((fullName) => {
-      const r = repoMap.get(fullName);
-      const vis = r?.isPrivate ? '🔒 Private' : '🌐 Public';
-      const stars = r ? ` · ★${r.stargazersCount}` : '';
-      return `<span class="preview-chip">${escapeHtml(fullName)} (${vis}${stars})</span>`;
-    })
-    .join('');
-
+  els.deleteRepoModalTitle.textContent = `Permanently Delete ${n} ${noun}`;
+  els.deleteRepoModalDesc.textContent = `You are about to permanently delete ${n} ${noun.toLowerCase()} from @${state.auth.viewerLogin}. This cannot be undone. Consider archiving instead: it is reversible.`;
+  els.deleteRepoPreviewList.innerHTML = repoFullNames.map((name) => repoChipHtml(name, repoMap.get(name))).join('');
   els.deleteRepoConfirmInput.value = '';
+  els.deleteRepoConfirmInput.disabled = false;
   els.confirmDeleteRepoBtn.disabled = true;
-  els.confirmDeleteRepoBtn.textContent = `Permanently Delete ${repoFullNames.length} Repo${
-    repoFullNames.length === 1 ? '' : 's'
-  }`;
-  els.deleteRepoConfirmWrap.classList.remove('hidden');
-  els.deleteRepoProgressWrap.classList.add('hidden');
-  els.deleteRepoModalError.classList.add('hidden');
-  els.deleteRepoModal.classList.remove('hidden');
+  show(els.confirmDeleteRepoBtn);
+  els.confirmDeleteRepoBtn.textContent = `Permanently Delete ${n} Repo${n === 1 ? '' : 's'}`;
+  els.cancelDeleteRepoBtn.textContent = 'Cancel';
+  show(els.deleteRepoConfirmWrap);
+  hide(els.deleteRepoProgressWrap);
+  hide(els.deleteRepoModalError);
+  show(els.deleteRepoModal);
   els.deleteRepoConfirmInput.focus();
 }
 
 function closeDeleteRepoModal() {
-  els.deleteRepoModal.classList.add('hidden');
+  if (state.opController) return stopCurrentOperation();
+  hide(els.deleteRepoModal);
   state.pendingDeleteRepos = [];
   els.deleteRepoConfirmInput.value = '';
 }
 
-function showMissingDeleteRepoScopeError() {
-  const isCli = state.runtimeMode === 'local-cli';
-  els.deleteRepoProgressWrap.classList.add('hidden');
-  els.deleteRepoModalError.classList.remove('hidden');
-  els.deleteRepoModalError.innerHTML = isCli
-    ? `<strong>Missing <code>delete_repo</code> permission scope.</strong><br/>
-       Run <code>gh auth refresh -h github.com -s delete_repo</code> in your terminal or open
-       <button type="button" id="inline-repo-auth-btn" class="btn-link">Auth Settings</button> to paste a token with <code>delete_repo</code>.`
-    : `<strong>Token with <code>delete_repo</code> scope required.</strong><br/>
-       Open <button type="button" id="inline-repo-auth-btn" class="btn-link">Auth Settings</button> and use the <strong>Follow + Repo Deletion</strong> token link.`;
-
-  const btn = document.getElementById('inline-repo-auth-btn');
-  if (btn) {
-    btn.addEventListener('click', () => {
-      closeDeleteRepoModal();
-      updateTokenCreationLinks();
-      els.authModal.classList.remove('hidden');
-    });
-  }
-  els.confirmDeleteRepoBtn.disabled = false;
-}
-
 async function executePendingRepoDelete() {
   const repos = [...state.pendingDeleteRepos];
-  if (repos.length === 0) return;
+  if (!repos.length || state.opController) return;
   if (els.deleteRepoConfirmInput.value.trim() !== 'DELETE') return;
 
   els.confirmDeleteRepoBtn.disabled = true;
-  els.deleteRepoModalError.classList.add('hidden');
-  els.deleteRepoProgressWrap.classList.remove('hidden');
-  els.deleteRepoProgressBar.style.width = '8%';
-  els.deleteRepoProgressText.textContent = `Deleting ${repos.length} repositories serially...`;
+  els.deleteRepoConfirmInput.disabled = true;
+  els.cancelDeleteRepoBtn.textContent = '■ Stop';
+  hide(els.deleteRepoModalError);
+  show(els.deleteRepoProgressWrap);
+  setModalProgress(els.deleteRepoProgressBar, els.deleteRepoProgressText, 0, repos.length, `Deleting ${plural(repos.length, 'repository', 'repositories')}...`);
 
-  const deletedSet = new Set();
+  const outcome = await runMutation('delete', repos, {
+    progress: (done, total, ok) =>
+      setModalProgress(els.deleteRepoProgressBar, els.deleteRepoProgressText, done, total, `Deleted ${ok} of ${total}...`),
+    retry: (msg) => {
+      els.deleteRepoProgressText.textContent = msg;
+    },
+  });
 
-  if (state.runtimeMode === 'local-cli') {
-    const chunkSize = 5;
-    for (let i = 0; i < repos.length; i += chunkSize) {
-      const batch = repos.slice(i, i + chunkSize);
-      const res = await fetch('/api/repos/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repos: batch }),
-      });
-      const payload = await res.json();
-
-      if (!res.ok) {
-        if (payload.code === 'MISSING_DELETE_REPO_SCOPE' || payload.code === 'NO_TOKEN') {
-          showMissingDeleteRepoScopeError();
-        } else {
-          els.deleteRepoProgressWrap.classList.add('hidden');
-          els.deleteRepoModalError.classList.remove('hidden');
-          els.deleteRepoModalError.textContent = payload.error || 'Failed to delete repositories.';
-          els.confirmDeleteRepoBtn.disabled = false;
-        }
-        return;
-      }
-
-      for (const fullName of payload.succeeded || []) {
-        deletedSet.add(fullName.toLowerCase());
-        state.selectedRepos.delete(fullName);
-      }
-
-      const pct = Math.min(100, Math.round(((i + batch.length) / repos.length) * 100));
-      els.deleteRepoProgressBar.style.width = `${pct}%`;
-      els.deleteRepoProgressText.textContent = `Deleted ${deletedSet.size} of ${repos.length}...`;
-    }
-  } else {
-    const token = getBrowserPat();
-    if (!token) {
-      showMissingDeleteRepoScopeError();
-      return;
-    }
-
-    for (let i = 0; i < repos.length; i++) {
-      const fullName = repos[i];
-      const [owner, repoName] = fullName.split('/');
-      if (i > 0) {
-        await sleep(REPO_DELETE_DELAY_MS);
-      }
-
-      const res = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`,
-        {
-          method: 'DELETE',
-          headers: buildGitHubHeaders(token),
-        }
-      );
-
-      if (res.status === 204) {
-        deletedSet.add(fullName.toLowerCase());
-        state.selectedRepos.delete(fullName);
-      } else {
-        const currentScopes = res.headers.get('x-oauth-scopes') || '';
-        const isFineGrained = token.startsWith('github_pat_');
-        if (
-          !isFineGrained &&
-          (res.status === 403 || res.status === 404) &&
-          !currentScopes.includes('delete_repo')
-        ) {
-          showMissingDeleteRepoScopeError();
-          return;
-        }
-      }
-
-      const pct = Math.min(100, Math.round(((i + 1) / repos.length) * 100));
-      els.deleteRepoProgressBar.style.width = `${pct}%`;
-      els.deleteRepoProgressText.textContent = `Deleted ${deletedSet.size} of ${repos.length}...`;
-    }
+  els.cancelDeleteRepoBtn.textContent = 'Close';
+  const deleted = new Set(outcome.results.filter((r) => r.ok).map((r) => r.item.toLowerCase()));
+  if (deleted.size && state.reposData) {
+    state.reposData.repos = state.reposData.repos.filter((r) => !deleted.has(r.fullName.toLowerCase()));
+    deleted.forEach((d) => {
+      for (const s of state.selectedRepos) if (s.toLowerCase() === d) state.selectedRepos.delete(s);
+    });
+    saveScanCache();
+    rerenderCurrent();
   }
 
-  if (state.reposData?.repos && deletedSet.size > 0) {
-    state.reposData.repos = state.reposData.repos.filter(
-      (r) => !deletedSet.has(r.fullName.toLowerCase())
-    );
+  if (outcome.stoppedForScope) {
+    hide(els.deleteRepoProgressWrap);
+    showScopeError(els.deleteRepoModalError, {
+      scope: 'delete_repo',
+      ghScope: 'delete_repo',
+      onOpenAuth: () => {
+        closeDeleteRepoModal();
+        openAuthModal();
+      },
+    });
+    return;
   }
 
-  closeDeleteRepoModal();
-  renderProfileAndStats();
-  renderRepoCards();
-  showToast(
-    `Permanently deleted ${deletedSet.size} repositor${deletedSet.size === 1 ? 'y' : 'ies'}`
-  );
+  const failures = summarizeFailures(outcome.results);
+  if (outcome.aborted || failures) {
+    els.deleteRepoProgressText.textContent =
+      `${outcome.aborted ? 'Stopped. ' : ''}Deleted ${deleted.size} of ${repos.length}.` + failures;
+    hide(els.confirmDeleteRepoBtn);
+    return;
+  }
+
+  hide(els.deleteRepoModal);
+  state.pendingDeleteRepos = [];
+  showToast(`Permanently deleted ${plural(deleted.size, 'repository', 'repositories')}`);
 }
 
 async function archiveRepos(repoFullNames, archived = true) {
-  if (!isViewingOwnVerifiedAccount()) {
-    updateTokenCreationLinks();
-    els.authModal.classList.remove('hidden');
-    return;
-  }
-  if (!repoFullNames || repoFullNames.length === 0) return;
+  if (!isViewingOwnVerifiedAccount()) return openAuthModal();
+  if (!repoFullNames?.length || state.opController) return;
 
-  // Skip repos that are already in the target archived state
   const repoMap = new Map((state.reposData?.repos || []).map((r) => [r.fullName.toLowerCase(), r]));
   const targets = repoFullNames.filter((name) => {
     const r = repoMap.get(name.toLowerCase());
     return !r || Boolean(r.isArchived) !== Boolean(archived);
   });
-
-  if (targets.length === 0) {
-    showToast(
-      archived
-        ? 'All selected repositories are already archived'
-        : 'All selected repositories are already active'
-    );
+  if (!targets.length) {
+    showToast(archived ? 'All selected repositories are already archived' : 'All selected repositories are already active', 'info');
     return;
   }
 
-  const updatedSet = new Set();
-  if (state.runtimeMode === 'local-cli') {
-    const res = await fetch('/api/repos/archive', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repos: targets, archived }),
+  const verb = archived ? 'Archived' : 'Unarchived';
+  const activity = startActivity(`${archived ? 'Archiving' : 'Unarchiving'} ${plural(targets.length, 'repository', 'repositories')}...`);
+  rerenderCurrent(); // disable batch buttons while running
+  let outcome;
+  try {
+    outcome = await runMutation(archived ? 'archive' : 'unarchive', targets, {
+      progress: (done, total, ok) => activity.progress(done, total, ok, verb),
+      retry: activity.retry,
     });
-    const payload = await res.json();
-    if (!res.ok) {
-      showToast(payload.error || 'Failed to update repository archive state', 'error');
-      if (payload.code === 'MISSING_REPO_SCOPE' || payload.code === 'NO_TOKEN') {
-        updateTokenCreationLinks();
-        els.authModal.classList.remove('hidden');
-      }
-      return;
-    }
-    for (const fullName of payload.succeeded || []) {
-      updatedSet.add(fullName.toLowerCase());
-      state.selectedRepos.delete(fullName);
-    }
-  } else {
-    const token = getBrowserPat();
-    if (!token) {
-      updateTokenCreationLinks();
-      els.authModal.classList.remove('hidden');
-      return;
-    }
-    for (let i = 0; i < targets.length; i++) {
-      const fullName = targets[i];
-      const [owner, repoName] = fullName.split('/');
-      if (i > 0) await sleep(REPO_DELETE_DELAY_MS);
-      const res = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`,
-        {
-          method: 'PATCH',
-          headers: {
-            ...buildGitHubHeaders(token),
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ archived }),
-        }
-      );
-      if (res.ok) {
-        updatedSet.add(fullName.toLowerCase());
-        state.selectedRepos.delete(fullName);
-      } else {
-        const currentScopes = res.headers.get('x-oauth-scopes') || '';
-        const errBody = await res.json().catch(() => ({}));
-        const msg = String(errBody.message || '');
-        if (archived && res.status === 403 && msg.toLowerCase().includes('archived')) {
-          updatedSet.add(fullName.toLowerCase());
-          state.selectedRepos.delete(fullName);
-          continue;
-        }
-        const isFineGrained = token.startsWith('github_pat_');
-        if (!isFineGrained && (res.status === 403 || res.status === 404) && !currentScopes.includes('repo')) {
-          showToast('Your token is missing the "repo" scope. Use the Full Housekeeping link in Auth Settings.', 'error');
-          updateTokenCreationLinks();
-          els.authModal.classList.remove('hidden');
-          return;
-        }
-        showToast(msg || `Could not archive ${fullName} (HTTP ${res.status})`, 'error');
-        return;
-      }
-    }
+  } finally {
+    activity.end();
   }
 
-  if (state.reposData?.repos && updatedSet.size > 0) {
-    for (const r of state.reposData.repos) {
-      if (updatedSet.has(r.fullName.toLowerCase())) {
-        r.isArchived = archived;
-      }
-    }
-    saveScanCache();
+  const updated = new Set(outcome.results.filter((r) => r.ok).map((r) => r.item.toLowerCase()));
+  for (const r of state.reposData?.repos || []) {
+    if (updated.has(r.fullName.toLowerCase())) r.isArchived = archived;
   }
-  renderProfileAndStats();
-  renderRepoCards();
+  for (const s of [...state.selectedRepos]) if (updated.has(s.toLowerCase())) state.selectedRepos.delete(s);
+  if (updated.size) saveScanCache();
+  rerenderCurrent();
+
+  if (outcome.stoppedForScope) {
+    showToast('Your token is missing the "repo" scope. Use the Full Housekeeping link in Auth Settings.', 'error');
+    return openAuthModal();
+  }
+  const failures = summarizeFailures(outcome.results);
   showToast(
-    `${archived ? 'Archived' : 'Unarchived'} ${updatedSet.size} repositor${
-      updatedSet.size === 1 ? 'y' : 'ies'
-    }`
+    `${outcome.aborted ? 'Stopped. ' : ''}${verb} ${updated.size} of ${plural(targets.length, 'repository', 'repositories')}.${failures}`,
+    failures || outcome.aborted ? 'error' : 'success',
+    { duration: failures ? 8000 : 4200 }
   );
 }
 
-function renderActiveView() {
-  if (state.activeTab === 'repos') {
-    loadAndRenderRepos();
-  } else {
-    renderUserCards();
-  }
+// ---------------------------------------------------------------------------
+// Export / copy
+// ---------------------------------------------------------------------------
+
+function downloadFile(content, filename, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function exportCurrentViewCsv() {
-  const escapeCsv = (val) => {
-    const str = String(val ?? '').replace(/\r?\n/g, ' ');
-    if (str.includes(',') || str.includes('"')) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
-
+  const date = new Date().toISOString().slice(0, 10);
   if (state.activeTab === 'repos') {
-    const repos = getFilteredAndSortedRepos();
-    if (repos.length === 0) {
-      showToast('No repositories in current view to export', 'error');
-      return;
-    }
-
-    const headers = [
-      'full_name',
-      'url',
-      'visibility',
-      'is_fork',
-      'is_archived',
-      'language',
-      'stars',
-      'forks',
-      'size_kb',
-      'pushed_at',
-      'description',
-    ];
-    const rows = repos.map((r) =>
-      [
+    const repos = getVisibleRepos();
+    if (!repos.length) return showToast('No repositories in current view to export', 'error');
+    const csv = toCsv(
+      ['full_name', 'url', 'visibility', 'is_fork', 'is_archived', 'language', 'stars', 'forks', 'size_kb', 'pushed_at', 'description'],
+      repos.map((r) => [
         r.fullName,
         r.htmlUrl,
         r.isPrivate ? 'private' : 'public',
@@ -2561,43 +1342,16 @@ function exportCurrentViewCsv() {
         r.sizeKb,
         r.pushedAt || '',
         r.description,
-      ]
-        .map(escapeCsv)
-        .join(',')
+      ])
     );
-    const csvContent = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `github-repos-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    return;
+    return downloadFile(csv, `github-repos-${date}.csv`, 'text/csv;charset=utf-8;');
   }
 
-  const users = getFilteredAndSortedUsers();
-  if (users.length === 0) {
-    showToast('No users in current view to export', 'error');
-    return;
-  }
-
-  const headers = [
-    'login',
-    'name',
-    'url',
-    'follows_back',
-    'allowlisted',
-    'followers_count',
-    'following_count',
-    'public_repos_count',
-    'company',
-    'location',
-    'bio',
-  ];
-
-  const rows = users.map((u) =>
-    [
+  const users = getVisibleUsers();
+  if (!users.length) return showToast('No users in current view to export', 'error');
+  const csv = toCsv(
+    ['login', 'name', 'url', 'follows_back', 'allowlisted', 'followers_count', 'following_count', 'public_repos_count', 'company', 'location', 'bio'],
+    users.map((u) => [
       u.login,
       u.name,
       u.url,
@@ -2609,490 +1363,332 @@ function exportCurrentViewCsv() {
       u.company,
       u.location,
       u.bio,
-    ]
-      .map(escapeCsv)
-      .join(',')
+    ])
   );
-
-  const csvContent = [headers.join(','), ...rows].join('\n');
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `github-${state.activeTab}-${new Date().toISOString().slice(0, 10)}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadFile(csv, `github-${state.activeTab}-${date}.csv`, 'text/csv;charset=utf-8;');
 }
 
-// Event Listeners
-els.usernameInput.addEventListener('input', (e) => {
-  updateTokenCreationLinks(e.target.value);
-});
-
-els.scanForm.addEventListener('submit', (e) => {
-  e.preventDefault();
-  scanAccount(els.usernameInput.value);
-});
-
-els.themeToggleBtn.addEventListener('click', () => {
-  applyTheme(state.theme === 'dark' ? 'light' : 'dark');
-});
-
-els.switchToViewerBtn.addEventListener('click', () => {
-  if (state.auth?.viewerLogin) {
-    scanAccount(state.auth.viewerLogin);
+async function copyText(text, successMessage) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(successMessage);
+  } catch {
+    showToast('Clipboard access was blocked by the browser', 'error');
   }
-});
+}
 
-if (els.rescanBtn) {
+// ---------------------------------------------------------------------------
+// Event wiring
+// ---------------------------------------------------------------------------
+
+function switchTab(tab) {
+  if (!tab || tab === state.activeTab) return;
+  state.activeTab = tab;
+  state.selectedLogins.clear();
+  state.selectedRepos.clear();
+  renderProfileAndStats();
+  renderActiveView();
+}
+
+function bindEvents() {
+  els.usernameInput.addEventListener('input', (e) => updateTokenCreationLinks(e.target.value));
+  els.scanForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    scanAccount(els.usernameInput.value);
+  });
+  els.cancelScanBtn.addEventListener('click', () => state.scanController?.abort());
+  els.themeToggleBtn.addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
+  els.switchToViewerBtn.addEventListener('click', () => {
+    if (state.auth?.viewerLogin) scanAccount(state.auth.viewerLogin);
+  });
   els.rescanBtn.addEventListener('click', () => {
     const target = state.data?.profile?.login || els.usernameInput.value;
     if (target) scanAccount(target);
   });
-}
 
-if (els.copyListBtn) {
-  els.copyListBtn.addEventListener('click', async () => {
-    let lines = [];
-    if (state.activeTab === 'repos') {
-      lines = getFilteredAndSortedRepos().map((r) => r.fullName);
-    } else {
-      lines = getFilteredAndSortedUsers().map((u) => `@${u.login}`);
-    }
-    if (lines.length === 0) {
-      showToast('Nothing in current view to copy', 'error');
-      return;
-    }
-    await navigator.clipboard.writeText(lines.join('\n'));
-    showToast(`Copied ${lines.length} item${lines.length === 1 ? '' : 's'} to clipboard`);
+  els.copyListBtn.addEventListener('click', () => {
+    const lines =
+      state.activeTab === 'repos' ? getVisibleRepos().map((r) => r.fullName) : getVisibleUsers().map((u) => `@${u.login}`);
+    if (!lines.length) return showToast('Nothing in current view to copy', 'error');
+    copyText(lines.join('\n'), `Copied ${plural(lines.length, 'item')} to clipboard`);
   });
-}
 
-if (els.viewGridBtn && els.viewCompactBtn) {
   els.viewGridBtn.addEventListener('click', () => applyViewMode('grid'));
   els.viewCompactBtn.addEventListener('click', () => applyViewMode('compact'));
-}
 
-if (els.autoShieldPopularBtn) {
-  els.autoShieldPopularBtn.addEventListener('click', async () => {
-    const creators = getUnshieldedPopularCreators().map((u) => u.login);
-    if (creators.length > 0) {
-      await addToAllowlist(creators);
+  els.autoShieldPopularBtn.addEventListener('click', () => {
+    const creators = getUnshieldedCreators(state.data?.nonFollowers, state.allowlist).map((u) => u.login);
+    if (creators.length) updateAllowlist(creators, true);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    const tag = document.activeElement?.tagName;
+    if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) {
+      e.preventDefault();
+      els.searchInput.focus();
+    }
+    if (e.key === 'Escape') {
+      if (!els.authModal.classList.contains('hidden')) hide(els.authModal);
+      else if (!els.unfollowModal.classList.contains('hidden') && !state.opController) closeUnfollowModal();
+      else if (!els.deleteRepoModal.classList.contains('hidden') && !state.opController) closeDeleteRepoModal();
     }
   });
-}
 
-// Keyboard shortcut: Press '/' anywhere (outside inputs) to focus search box
-window.addEventListener('keydown', (e) => {
-  if (
-    e.key === '/' &&
-    document.activeElement &&
-    !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)
-  ) {
-    e.preventDefault();
-    els.searchInput?.focus();
-  }
-});
+  const toggleModesExplainer = () => els.modesExplainer.classList.toggle('hidden');
+  els.modeBadgeBtn.addEventListener('click', toggleModesExplainer);
+  els.guideBtn.addEventListener('click', toggleModesExplainer);
+  els.closeModesExplainer.addEventListener('click', () => hide(els.modesExplainer));
 
-const toggleModesExplainer = () => {
-  els.modesExplainer.classList.toggle('hidden');
-};
-els.modeBadgeBtn.addEventListener('click', toggleModesExplainer);
-els.guideBtn.addEventListener('click', toggleModesExplainer);
-els.closeModesExplainer.addEventListener('click', () => {
-  els.modesExplainer.classList.add('hidden');
-});
+  els.statCards.forEach((card) => card.addEventListener('click', () => switchTab(card.dataset.tab)));
+  els.tabBtns.forEach((btn) => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
 
-els.statCards.forEach((card) => {
-  card.addEventListener('click', () => {
-    state.activeTab = card.dataset.tab;
-    state.selectedLogins.clear();
-    state.selectedRepos.clear();
+  els.showAllowlistedCheckbox.addEventListener('change', (e) => {
+    state.showAllowlistedInNonFollowers = e.target.checked;
     renderProfileAndStats();
-    renderActiveView();
-  });
-});
-
-els.tabBtns.forEach((btn) => {
-  btn.addEventListener('click', () => {
-    state.activeTab = btn.dataset.tab;
-    state.selectedLogins.clear();
-    state.selectedRepos.clear();
-    renderProfileAndStats();
-    renderActiveView();
-  });
-});
-
-els.showAllowlistedCheckbox.addEventListener('change', (e) => {
-  state.showAllowlistedInNonFollowers = e.target.checked;
-  renderProfileAndStats();
-  renderUserCards();
-});
-
-els.searchInput.addEventListener('input', (e) => {
-  state.searchQuery = e.target.value;
-  if (state.activeTab === 'repos') {
-    renderRepoCards();
-  } else {
-    renderUserCards();
-  }
-});
-
-els.presetBtns.forEach((btn) => {
-  btn.addEventListener('click', () => {
-    state.preset = btn.dataset.preset;
-    els.presetBtns.forEach((b) => b.classList.toggle('active', b === btn));
     renderUserCards();
   });
-});
 
-els.repoPresetBtns.forEach((btn) => {
-  btn.addEventListener('click', () => {
-    state.repoPreset = btn.dataset.repoPreset;
-    els.repoPresetBtns.forEach((b) => b.classList.toggle('active', b === btn));
-    renderRepoCards();
+  els.searchInput.addEventListener('input', (e) => {
+    state.searchQuery = e.target.value;
+    if (state.activeTab === 'repos') renderRepoCards();
+    else renderUserCards();
   });
-});
 
-els.sortSelect.addEventListener('change', (e) => {
-  state.sortBy = e.target.value;
-  renderUserCards();
-});
-
-if (els.repoSortSelect) {
+  els.presetBtns.forEach((btn) =>
+    btn.addEventListener('click', () => {
+      state.preset = btn.dataset.preset;
+      els.presetBtns.forEach((b) => b.classList.toggle('active', b === btn));
+      renderUserCards();
+    })
+  );
+  els.repoPresetBtns.forEach((btn) =>
+    btn.addEventListener('click', () => {
+      state.repoPreset = btn.dataset.repoPreset;
+      els.repoPresetBtns.forEach((b) => b.classList.toggle('active', b === btn));
+      renderProfileAndStats();
+      renderRepoCards();
+    })
+  );
+  els.sortSelect.addEventListener('change', (e) => {
+    state.sortBy = e.target.value;
+    renderUserCards();
+  });
   els.repoSortSelect.addEventListener('change', (e) => {
     state.repoSortBy = e.target.value;
     renderRepoCards();
   });
-}
 
-els.selectAllCheckbox.addEventListener('change', (e) => {
-  if (state.activeTab === 'repos') {
-    const visible = getFilteredAndSortedRepos();
-    if (e.target.checked) {
-      visible.forEach((r) => state.selectedRepos.add(r.fullName));
+  els.selectAllCheckbox.addEventListener('change', (e) => {
+    const repos = state.activeTab === 'repos';
+    const ids = repos ? getVisibleRepos().map((r) => r.fullName) : getVisibleUsers().map((u) => u.login);
+    const set = repos ? state.selectedRepos : state.selectedLogins;
+    ids.forEach((id) => (e.target.checked ? set.add(id) : set.delete(id)));
+    if (repos) renderRepoCards();
+    else renderUserCards();
+  });
+  els.clearSelectionBtn.addEventListener('click', () => {
+    if (state.activeTab === 'repos') {
+      state.selectedRepos.clear();
+      renderRepoCards();
     } else {
-      visible.forEach((r) => state.selectedRepos.delete(r.fullName));
+      state.selectedLogins.clear();
+      renderUserCards();
     }
-    renderRepoCards();
-    return;
-  }
+  });
 
-  const visible = getFilteredAndSortedUsers();
-  if (e.target.checked) {
-    visible.forEach((u) => state.selectedLogins.add(u.login));
-  } else {
-    visible.forEach((u) => state.selectedLogins.delete(u.login));
-  }
-  renderUserCards();
-});
+  els.batchAllowlistAddBtn.addEventListener('click', () => updateAllowlist([...state.selectedLogins], true));
+  els.batchAllowlistRemoveBtn.addEventListener('click', () => updateAllowlist([...state.selectedLogins], false));
+  els.batchUnfollowBtn.addEventListener('click', () => openUnfollowModal([...state.selectedLogins]));
+  els.batchArchiveReposBtn.addEventListener('click', () => archiveRepos([...state.selectedRepos], true));
+  els.batchUnarchiveReposBtn.addEventListener('click', () => archiveRepos([...state.selectedRepos], false));
+  els.batchDeleteReposBtn.addEventListener('click', () => openDeleteRepoModal([...state.selectedRepos]));
 
-els.clearSelectionBtn.addEventListener('click', () => {
-  if (state.activeTab === 'repos') {
-    state.selectedRepos.clear();
-    renderRepoCards();
-  } else {
-    state.selectedLogins.clear();
-    renderUserCards();
-  }
-});
+  els.activityStopBtn.addEventListener('click', () => {
+    els.activityStopBtn.disabled = true;
+    els.activityText.textContent = 'Stopping after the current request...';
+    stopCurrentOperation();
+  });
+  els.undoRefollowBtn.addEventListener('click', refollowLastBatch);
+  els.undoDismissBtn.addEventListener('click', () => {
+    local.remove(undoKey());
+    hide(els.undoBanner);
+  });
 
-els.batchAllowlistAddBtn.addEventListener('click', () => {
-  addToAllowlist([...state.selectedLogins]);
-});
+  els.cardsGrid.addEventListener('click', onCardClick);
 
-els.batchAllowlistRemoveBtn.addEventListener('click', () => {
-  removeFromAllowlist([...state.selectedLogins]);
-});
+  els.closeUnfollowModal.addEventListener('click', closeUnfollowModal);
+  els.cancelUnfollowBtn.addEventListener('click', closeUnfollowModal);
+  els.confirmUnfollowBtn.addEventListener('click', executePendingUnfollow);
 
-els.batchUnfollowBtn.addEventListener('click', () => {
-  openUnfollowModal([...state.selectedLogins]);
-});
+  els.closeDeleteRepoModal.addEventListener('click', closeDeleteRepoModal);
+  els.cancelDeleteRepoBtn.addEventListener('click', closeDeleteRepoModal);
+  els.deleteRepoConfirmInput.addEventListener('input', (e) => {
+    els.confirmDeleteRepoBtn.disabled = e.target.value.trim() !== 'DELETE';
+  });
+  els.deleteRepoConfirmInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !els.confirmDeleteRepoBtn.disabled) executePendingRepoDelete();
+  });
+  els.confirmDeleteRepoBtn.addEventListener('click', executePendingRepoDelete);
 
-if (els.batchArchiveReposBtn) {
-  els.batchArchiveReposBtn.addEventListener('click', () => {
-    archiveRepos([...state.selectedRepos], true);
+  const openAuthFresh = async () => {
+    await refreshAuth();
+    openAuthModal();
+  };
+  els.authBtn.addEventListener('click', openAuthFresh);
+  els.openAuthModalBtn.addEventListener('click', openAuthFresh);
+  els.errorAuthCtaBtn.addEventListener('click', openAuthFresh);
+  els.closeAuthModal.addEventListener('click', () => hide(els.authModal));
+
+  const copyGhCommand = () =>
+    copyText('gh auth refresh -h github.com -s user:follow', 'Copied command: gh auth refresh -h github.com -s user:follow');
+  els.copyGhCmdBtn.addEventListener('click', copyGhCommand);
+  els.modalCopyGhBtn.addEventListener('click', copyGhCommand);
+
+  els.savePatBtn.addEventListener('click', async () => {
+    const token = els.customPatInput.value.trim();
+    try {
+      state.auth = await state.backend.setToken(token);
+    } catch (err) {
+      return showToast(`Could not verify token: ${errorText(err)}`, 'error');
+    }
+    renderModeAndAuthUI();
+    els.customPatInput.value = '';
+    hide(els.authModal);
+    if (state.auth.authenticated) {
+      showToast(`Verified as @${state.auth.viewerLogin}`);
+      await scanAccount(state.auth.viewerLogin);
+    } else {
+      rerenderCurrent();
+      showToast(state.auth.error ? `Token rejected: ${state.auth.error}` : 'Token cleared or invalid', 'error');
+    }
+  });
+
+  els.clearPatBtn.addEventListener('click', async () => {
+    try {
+      state.auth = await state.backend.setToken('');
+    } catch (err) {
+      return showToast(errorText(err), 'error');
+    }
+    showToast(isCli() ? 'Switched to default GitHub CLI authentication' : 'Cleared browser token');
+    renderModeAndAuthUI();
+    renderUndoBanner();
+    if (state.data) rerenderCurrent();
+    els.customPatInput.value = '';
+  });
+
+  els.exportCsvBtn.addEventListener('click', exportCurrentViewCsv);
+  els.exportAllowlistBtn.addEventListener('click', () =>
+    downloadFile(
+      JSON.stringify(state.allowlist, null, 2),
+      `github-allowlist-${new Date().toISOString().slice(0, 10)}.json`,
+      'application/json'
+    )
+  );
+  els.importAllowlistInput.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      const before = Object.keys(state.allowlist).length;
+      state.allowlist = await state.backend.allowlistImport(state.allowlist, parsed);
+      if (state.data) state.data.allowlist = state.allowlist;
+      saveScanCache();
+      rerenderCurrent();
+      showToast(`Imported allowlist (${Object.keys(state.allowlist).length - before} new entries)`);
+    } catch {
+      showToast('Invalid allowlist JSON file', 'error');
+    } finally {
+      e.target.value = '';
+    }
+  });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (state.opController) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
   });
 }
 
-if (els.batchUnarchiveReposBtn) {
-  els.batchUnarchiveReposBtn.addEventListener('click', () => {
-    archiveRepos([...state.selectedRepos], false);
-  });
+function toggleSelection(set, id, checked, anchor, shiftKey, visibleIds) {
+  const ids = shiftKey && anchor && anchor !== id ? rangeBetween(visibleIds, anchor, id) : [id];
+  ids.forEach((x) => (checked ? set.add(x) : set.delete(x)));
 }
 
-if (els.batchDeleteReposBtn) {
-  els.batchDeleteReposBtn.addEventListener('click', () => {
-    openDeleteRepoModal([...state.selectedRepos]);
-  });
-}
-
-els.cardsGrid.addEventListener('click', (e) => {
+function onCardClick(e) {
   const actionEl = e.target.closest('[data-action]');
   if (!actionEl) return;
-  const action = actionEl.dataset.action;
-  const login = actionEl.dataset.login;
-  const repo = actionEl.dataset.repo;
+  const { action, login, repo } = actionEl.dataset;
 
-  if (action === 'prompt-signin') {
-    updateTokenCreationLinks();
-    els.authModal.classList.remove('hidden');
-    return;
+  switch (action) {
+    case 'prompt-signin':
+      return openAuthModal();
+    case 'toggle-repo-select':
+      toggleSelection(
+        state.selectedRepos,
+        repo,
+        actionEl.checked,
+        state.lastClickedRepo,
+        e.shiftKey,
+        getVisibleRepos().map((r) => r.fullName)
+      );
+      state.lastClickedRepo = repo;
+      return renderRepoCards();
+    case 'toggle-repo-archive':
+      return archiveRepos([repo], actionEl.dataset.archived !== 'true');
+    case 'delete-repo-single':
+      return openDeleteRepoModal([repo]);
+    case 'toggle-select':
+      toggleSelection(
+        state.selectedLogins,
+        login,
+        actionEl.checked,
+        state.lastClickedLogin,
+        e.shiftKey,
+        getVisibleUsers().map((u) => u.login)
+      );
+      state.lastClickedLogin = login;
+      return renderUserCards();
+    case 'toggle-allowlist':
+      return updateAllowlist([login], !isAllowlisted(login));
+    case 'unfollow-single':
+      return openUnfollowModal([login]);
+    default:
+      return undefined;
   }
-
-  if (action === 'toggle-repo-select' && repo) {
-    const isChecked = actionEl.checked;
-    if (e.shiftKey && state.lastClickedRepo && state.lastClickedRepo !== repo) {
-      const visibleRepos = getFilteredAndSortedRepos().map((r) => r.fullName);
-      const startIdx = visibleRepos.indexOf(state.lastClickedRepo);
-      const endIdx = visibleRepos.indexOf(repo);
-      if (startIdx !== -1 && endIdx !== -1) {
-        const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
-        for (let i = from; i <= to; i++) {
-          if (isChecked) {
-            state.selectedRepos.add(visibleRepos[i]);
-          } else {
-            state.selectedRepos.delete(visibleRepos[i]);
-          }
-        }
-      }
-    } else if (isChecked) {
-      state.selectedRepos.add(repo);
-    } else {
-      state.selectedRepos.delete(repo);
-    }
-    state.lastClickedRepo = repo;
-    renderRepoCards();
-    return;
-  }
-
-  if (action === 'toggle-repo-archive' && repo) {
-    const currentlyArchived = actionEl.dataset.archived === 'true';
-    archiveRepos([repo], !currentlyArchived);
-    return;
-  }
-
-  if (action === 'delete-repo-single' && repo) {
-    openDeleteRepoModal([repo]);
-    return;
-  }
-
-  if (!login) return;
-
-  if (action === 'toggle-select') {
-    const isChecked = actionEl.checked;
-    if (e.shiftKey && state.lastClickedLogin && state.lastClickedLogin !== login) {
-      const visibleLogins = getFilteredAndSortedUsers().map((u) => u.login);
-      const startIdx = visibleLogins.indexOf(state.lastClickedLogin);
-      const endIdx = visibleLogins.indexOf(login);
-      if (startIdx !== -1 && endIdx !== -1) {
-        const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
-        for (let i = from; i <= to; i++) {
-          if (isChecked) {
-            state.selectedLogins.add(visibleLogins[i]);
-          } else {
-            state.selectedLogins.delete(visibleLogins[i]);
-          }
-        }
-      }
-    } else if (isChecked) {
-      state.selectedLogins.add(login);
-    } else {
-      state.selectedLogins.delete(login);
-    }
-    state.lastClickedLogin = login;
-    renderUserCards();
-  } else if (action === 'toggle-allowlist') {
-    if (isAllowlisted(login)) {
-      removeFromAllowlist([login]);
-    } else {
-      addToAllowlist([login]);
-    }
-  } else if (action === 'unfollow-single') {
-    openUnfollowModal([login]);
-  }
-});
-
-// Unfollow Modal events
-els.closeUnfollowModal.addEventListener('click', closeUnfollowModal);
-els.cancelUnfollowBtn.addEventListener('click', closeUnfollowModal);
-els.confirmUnfollowBtn.addEventListener('click', executePendingUnfollow);
-
-// Delete Repo Modal events
-if (els.closeDeleteRepoModal) {
-  els.closeDeleteRepoModal.addEventListener('click', closeDeleteRepoModal);
-}
-if (els.cancelDeleteRepoBtn) {
-  els.cancelDeleteRepoBtn.addEventListener('click', closeDeleteRepoModal);
-}
-if (els.deleteRepoConfirmInput) {
-  els.deleteRepoConfirmInput.addEventListener('input', (e) => {
-    const valid = e.target.value.trim() === 'DELETE';
-    if (els.confirmDeleteRepoBtn) {
-      els.confirmDeleteRepoBtn.disabled = !valid;
-    }
-  });
-}
-if (els.confirmDeleteRepoBtn) {
-  els.confirmDeleteRepoBtn.addEventListener('click', executePendingRepoDelete);
 }
 
-// Auth Modal events
-els.authBtn.addEventListener('click', async () => {
-  await detectRuntimeAndAuth();
-  updateTokenCreationLinks();
-  els.authModal.classList.remove('hidden');
-});
-els.openAuthModalBtn.addEventListener('click', async () => {
-  await detectRuntimeAndAuth();
-  updateTokenCreationLinks();
-  els.authModal.classList.remove('hidden');
-});
-if (els.errorAuthCtaBtn) {
-  els.errorAuthCtaBtn.addEventListener('click', async () => {
-    await detectRuntimeAndAuth();
-    updateTokenCreationLinks();
-    els.authModal.classList.remove('hidden');
-  });
-}
-els.closeAuthModal.addEventListener('click', () => {
-  els.authModal.classList.add('hidden');
-});
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
 
-const copyGhCommand = async () => {
-  await navigator.clipboard.writeText('gh auth refresh -h github.com -s user:follow');
-  showToast('Copied command: gh auth refresh -h github.com -s user:follow');
-};
-els.copyGhCmdBtn.addEventListener('click', copyGhCommand);
-els.modalCopyGhBtn.addEventListener('click', copyGhCommand);
-
-els.savePatBtn.addEventListener('click', async () => {
-  const token = els.customPatInput.value.trim();
-  if (state.runtimeMode === 'local-cli') {
-    const res = await fetch('/api/auth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
-    });
-    state.auth = await res.json();
-  } else {
-    setBrowserPat(token);
-    state.auth = await checkWebClientAuthStatus();
-  }
-
-  renderModeAndAuthUI();
-  els.customPatInput.value = '';
-  els.authModal.classList.add('hidden');
-
-  if (state.auth.authenticated) {
-    showToast(`Verified as @${state.auth.viewerLogin}`);
-    // Automatically scan the authenticated user's own account!
-    await scanAccount(state.auth.viewerLogin);
-  } else {
-    renderProfileAndStats();
-    renderUserCards();
-    showToast('Token cleared or invalid', 'error');
-  }
-});
-
-els.clearPatBtn.addEventListener('click', async () => {
-  if (state.runtimeMode === 'local-cli') {
-    const res = await fetch('/api/auth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: '' }),
-    });
-    state.auth = await res.json();
-    showToast('Switched to default GitHub CLI authentication');
-  } else {
-    setBrowserPat('');
-    state.auth = await checkWebClientAuthStatus();
-    showToast('Cleared browser token');
-  }
-  renderModeAndAuthUI();
-  renderProfileAndStats();
-  renderUserCards();
-  els.customPatInput.value = '';
-});
-
-// Export / Import events
-els.exportCsvBtn.addEventListener('click', exportCurrentViewCsv);
-
-els.exportAllowlistBtn.addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(state.allowlist, null, 2)], {
-    type: 'application/json',
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `github-allowlist-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-});
-
-els.importAllowlistInput.addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const parsed = JSON.parse(text);
-    if (state.runtimeMode === 'local-cli') {
-      const res = await fetch('/api/allowlist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entries: parsed }),
-      });
-      const payload = await res.json();
-      if (res.ok) {
-        state.allowlist = payload.allowlist || {};
-      }
-    } else {
-      const now = new Date().toISOString();
-      for (const [key, val] of Object.entries(parsed || {})) {
-        const login = (val?.login || key || '').trim();
-        const lower = login.toLowerCase();
-        if (GITHUB_USERNAME_REGEX.test(login) && !FORBIDDEN_KEYS.has(lower)) {
-          state.allowlist[lower] = {
-            login,
-            note: typeof val?.note === 'string' ? val.note.slice(0, 200) : '',
-            addedAt: val?.addedAt || now,
-          };
-        }
-      }
-    }
-    saveLocalAllowlist(state.allowlist);
-    renderProfileAndStats();
-    renderUserCards();
-    showToast('Imported allowlist successfully');
-  } catch {
-    showToast('Invalid allowlist JSON file', 'error');
-  } finally {
-    e.target.value = '';
-  }
-});
-
-// Initial Bootstrap
 (async function init() {
-  initTheme();
-  initViewMode();
-  const status = await detectRuntimeAndAuth();
-  const urlParams = new URLSearchParams(window.location.search);
-  const queryUser = (urlParams.get('user') || urlParams.get('username') || '').trim();
-  const initialUser = queryUser || status.viewerLogin || '';
+  applyTheme(local.get(KEYS.theme) === 'dark' ? 'dark' : 'light');
+  applyViewMode(local.get(KEYS.view) === 'compact' ? 'compact' : 'grid');
+  bindEvents();
 
-  // Restore exact tab, filters, selections, and cached scan across page refreshes
-  const restored = tryRestoreWorkspaceSession(queryUser || status.viewerLogin || '');
-  if (restored) {
-    return;
+  const { mode, status } = await detectMode();
+  state.runtimeMode = mode;
+  state.backend = createBackend(mode);
+  if (mode === 'web-client') state.allowlist = loadLocalAllowlist();
+  if (status) {
+    state.auth = status;
+    renderModeAndAuthUI();
+  } else {
+    await refreshAuth();
   }
+
+  const params = new URLSearchParams(window.location.search);
+  const queryUser = (params.get('user') || params.get('username') || '').trim();
+  const initialUser = queryUser || state.auth?.viewerLogin || '';
+
+  if (tryRestoreWorkspaceSession(initialUser)) return;
 
   if (initialUser) {
-    els.usernameInput.value = initialUser;
-    updateTokenCreationLinks(initialUser);
     await scanAccount(initialUser);
   } else {
     updateTokenCreationLinks('');
-    els.modesExplainer.classList.remove('hidden');
-    els.welcomeState.classList.remove('hidden');
+    show(els.modesExplainer);
+    show(els.welcomeState);
   }
 })();

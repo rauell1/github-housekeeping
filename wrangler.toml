@@ -5,3 +5,7 @@ preview_urls = true
 
 [assets]
 directory = "./public"
+
+# Required by `npx wrangler preview` (used for non-production branch builds).
+# Empty on purpose: assets and compatibility settings stay at the top level.
+[previews]

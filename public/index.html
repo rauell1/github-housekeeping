@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GitHub Follow Housekeeping | Audit Non-Followers &amp; Curate Your Allowlist</title>
-  <meta name="description" content="Audit your GitHub following list, see who doesn't follow you back, curate a protected allowlist, and batch unfollow. Runs 100% in your browser or via npx CLI." />
-  <meta property="og:title" content="GitHub Follow Housekeeping" />
-  <meta property="og:description" content="Audit GitHub non-followers, curate a protected allowlist, and batch unfollow safely. Zero-backend privacy." />
+  <title>GitHub Housekeeping | Audit Non-Followers, Curate Your Allowlist &amp; Clean Up Repositories</title>
+  <meta name="description" content="Audit your GitHub following list, see who doesn't follow you back, curate a protected allowlist, batch unfollow with undo, and archive or delete unused repositories. Runs 100% in your browser or via npx CLI." />
+  <meta property="og:title" content="GitHub Housekeeping" />
+  <meta property="og:description" content="Audit GitHub non-followers, curate a protected allowlist, batch unfollow with undo, and clean up repositories. Zero-backend privacy." />
   <meta property="og:type" content="website" />
   <meta name="twitter:card" content="summary" />
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%230969da'%3E%3Cpath d='M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z'/%3E%3C/svg%3E" />
@@ -70,7 +70,7 @@
     <section id="modes-explainer" class="modes-explainer hidden">
       <div class="modes-header">
         <div>
-          <h3>Choose How You Want to Use GitHub Follow Housekeeping</h3>
+          <h3>Choose How You Want to Use GitHub Housekeeping</h3>
           <p>This tool works both as an instant browser web app (hosted on Cloudflare) and as a local CLI tool.</p>
         </div>
         <button type="button" id="close-modes-explainer" class="icon-close" aria-label="Dismiss">&times;</button>
@@ -120,7 +120,7 @@
       <div class="scope-banner-actions">
         <a
           id="banner-create-token-link"
-          href="https://github.com/settings/tokens/new?description=GitHub+Follow+Housekeeping&scopes=user:follow"
+          href="https://github.com/settings/tokens/new?description=GitHub+Housekeeping%3A+Follow&scopes=user:follow"
           target="_blank"
           rel="noopener noreferrer"
           class="btn btn-sm btn-primary"
@@ -177,6 +177,15 @@
       <!-- Realtime Snapshot Diff Banner (shows who unfollowed / followed since last scan) -->
       <div id="snapshot-diff-banner" class="snapshot-diff-banner hidden"></div>
 
+      <!-- Undo banner: re-follow the last unfollowed batch -->
+      <div id="undo-banner" class="undo-banner hidden" role="status">
+        <span id="undo-banner-text"></span>
+        <div class="undo-banner-actions">
+          <button type="button" id="undo-refollow-btn" class="btn btn-secondary btn-sm">↩ Re-follow</button>
+          <button type="button" id="undo-dismiss-btn" class="btn-link" title="Forget this batch">Dismiss</button>
+        </div>
+      </div>
+
       <div class="stats-grid">
         <button type="button" class="stat-card stat-card-danger active" data-tab="non-followers">
           <div class="stat-label">Not Following Back (Actionable)</div>
@@ -214,19 +223,19 @@
     <section id="controls-section" class="controls-section hidden">
       <div class="tabs-row">
         <div class="tabs" role="tablist">
-          <button type="button" class="tab-btn active" data-tab="non-followers">
+          <button type="button" class="tab-btn active" role="tab" aria-selected="true" data-tab="non-followers">
             Not Following Back <span id="tab-count-non-followers" class="tab-badge">0</span>
           </button>
-          <button type="button" class="tab-btn" data-tab="allowlist">
+          <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="allowlist">
             Allowlist / Ignored <span id="tab-count-allowlist" class="tab-badge">0</span>
           </button>
-          <button type="button" class="tab-btn" data-tab="mutuals">
+          <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="mutuals">
             Mutuals <span id="tab-count-mutuals" class="tab-badge">0</span>
           </button>
-          <button type="button" class="tab-btn" data-tab="fans">
+          <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="fans">
             Followers You Don't Follow <span id="tab-count-fans" class="tab-badge">0</span>
           </button>
-          <button type="button" class="tab-btn" data-tab="repos">
+          <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="repos">
             📦 Repositories <span id="tab-count-repos" class="tab-badge">-</span>
           </button>
         </div>
@@ -309,6 +318,7 @@
             <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="forks">⑂ Forks</button>
             <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="private">🔒 Private</button>
             <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="public">🌐 Public</button>
+            <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="active">✅ Not Archived</button>
             <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="archived">📦 Archived</button>
             <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="dormant">💤 Dormant (&gt;1yr)</button>
             <button type="button" class="pill-btn repo-pill-btn" data-repo-preset="zero-stars">0 Stars</button>
@@ -357,6 +367,17 @@
 
     <!-- Loading / Welcome / Error / Empty States & Cards Grid -->
     <main class="main-content">
+      <div id="activity-bar" class="activity-bar hidden" role="status" aria-live="polite">
+        <div class="activity-main">
+          <span class="spinner spinner-sm" aria-hidden="true"></span>
+          <span id="activity-text">Working...</span>
+        </div>
+        <div class="progress-bar-bg activity-progress">
+          <div id="activity-progress-bar" class="progress-bar-fill"></div>
+        </div>
+        <button type="button" id="activity-stop-btn" class="btn btn-secondary btn-sm">■ Stop</button>
+      </div>
+
       <div id="welcome-state" class="state-box hidden">
         <h3>Enter your GitHub username to begin</h3>
         <p>Type your GitHub handle in the <code>@username</code> box above and click <strong>Scan Account</strong>, or click <strong>Auth Settings</strong> to generate a token in 1 click.</p>
@@ -364,14 +385,17 @@
 
       <div id="loading-state" class="state-box hidden">
         <div class="spinner"></div>
-        <p id="loading-text">Scanning GitHub following &amp; followers...</p>
+        <p id="loading-text" aria-live="polite">Scanning GitHub following &amp; followers...</p>
+        <p id="loading-subtext" class="loading-subtext hidden" aria-live="polite"></p>
+        <button type="button" id="cancel-scan-btn" class="btn btn-secondary btn-sm hidden">■ Cancel</button>
       </div>
 
       <div id="error-state" class="state-box error-box hidden">
-        <h3>Could not complete scan</h3>
+        <h3 id="error-title">Could not complete scan</h3>
         <p id="error-message"></p>
-        <div id="error-actions" style="margin-top: 14px;" class="hidden">
-          <button type="button" id="error-auth-cta-btn" class="btn btn-primary btn-sm">
+        <div id="error-actions" class="error-actions hidden">
+          <button type="button" id="error-retry-btn" class="btn btn-secondary btn-sm hidden">↻ Try Again</button>
+          <button type="button" id="error-auth-cta-btn" class="btn btn-primary btn-sm hidden">
             🔑 Connect Free GitHub Token (Unlocks 5,000 req/hr)
           </button>
         </div>
@@ -388,7 +412,7 @@
     <!-- Open Source & Community Footer -->
     <footer class="app-footer">
       <div class="footer-left">
-        <span><strong>GitHub Follow Housekeeping</strong> · Released under the <a href="https://github.com/rauell1/github-housekeeping/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a></span>
+        <span><strong>GitHub Housekeeping</strong> · Released under the <a href="https://github.com/rauell1/github-housekeeping/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a></span>
       </div>
       <div class="footer-links">
         <a href="https://github.com/rauell1/github-housekeeping" target="_blank" rel="noopener noreferrer">⭐ Star / Fork on GitHub ↗</a>
@@ -401,7 +425,7 @@
   </div>
 
   <!-- Confirmation Modal for Unfollow -->
-  <div id="unfollow-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+  <div id="unfollow-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="unfollow-modal-title">
     <div class="modal">
       <div class="modal-header">
         <h3 id="unfollow-modal-title">Confirm Unfollow</h3>
@@ -416,7 +440,7 @@
           <div class="progress-bar-bg">
             <div id="unfollow-progress-bar" class="progress-bar-fill"></div>
           </div>
-          <p id="unfollow-progress-text" class="progress-text">Processing serially (300ms pacing)...</p>
+          <p id="unfollow-progress-text" class="progress-text" aria-live="polite">Processing one at a time...</p>
         </div>
         <div id="unfollow-modal-error" class="modal-error hidden"></div>
       </div>
@@ -430,7 +454,7 @@
   </div>
 
   <!-- Confirmation Modal for Permanent Repository Deletion -->
-  <div id="delete-repo-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+  <div id="delete-repo-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="delete-repo-modal-title">
     <div class="modal">
       <div class="modal-header">
         <h3 id="delete-repo-modal-title">Permanently Delete Repositories</h3>
@@ -459,7 +483,7 @@
           <div class="progress-bar-bg">
             <div id="delete-repo-progress-bar" class="progress-bar-fill"></div>
           </div>
-          <p id="delete-repo-progress-text" class="progress-text">Deleting repositories serially (350ms pacing)...</p>
+          <p id="delete-repo-progress-text" class="progress-text" aria-live="polite">Deleting one at a time...</p>
         </div>
         <div id="delete-repo-modal-error" class="modal-error hidden"></div>
       </div>
@@ -473,10 +497,10 @@
   </div>
 
   <!-- Auth & Scope Configuration Modal -->
-  <div id="auth-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+  <div id="auth-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
     <div class="modal">
       <div class="modal-header">
-        <h3>GitHub Authentication &amp; Easy Token Creator</h3>
+        <h3 id="auth-modal-title">GitHub Authentication &amp; Easy Token Creator</h3>
         <button type="button" id="close-auth-modal" class="icon-close" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
@@ -503,7 +527,7 @@
               <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
                 <a
                   id="modal-create-token-link"
-                  href="https://github.com/settings/tokens/new?description=GitHub+Follow+Housekeeping&scopes=user:follow"
+                  href="https://github.com/settings/tokens/new?description=GitHub+Housekeeping%3A+Follow&scopes=user:follow"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="btn btn-primary btn-sm"
@@ -512,7 +536,7 @@
                 </a>
                 <a
                   id="modal-create-repo-token-link"
-                  href="https://github.com/settings/tokens/new?description=GitHub+Follow+%26+Repo+Housekeeping&scopes=user:follow,delete_repo,repo"
+                  href="https://github.com/settings/tokens/new?description=GitHub+Housekeeping%3A+Follow+%2B+Repos&scopes=user:follow,repo,delete_repo"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="btn btn-secondary btn-sm"

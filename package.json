@@ -1,20 +1,25 @@
 {
   "name": "github-housekeeping",
-  "version": "1.2.0",
-  "description": "Zero-dependency tool for GitHub Follow & Repository Housekeeping: audit non-followers, curate a protected allowlist, batch unfollow, and safely mass-delete unused repositories.",
+  "version": "1.3.0",
+  "description": "Zero-dependency tool for GitHub Follow & Repository Housekeeping: audit non-followers, curate a protected allowlist, batch unfollow with undo, and safely archive or delete unused repositories.",
   "type": "module",
   "bin": {
     "github-housekeeping": "./server.mjs"
   },
   "files": [
     "server.mjs",
+    "lib/",
     "public/",
     "README.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "author": "Roy Otieno (@rauell1)",
   "scripts": {
     "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
     "cf:dev": "npx wrangler dev",
     "cf:deploy": "npx wrangler deploy"
   },
@@ -25,7 +30,10 @@
     "housekeeping",
     "unfollow",
     "gh-cli",
-    "dashboard"
+    "dashboard",
+    "repositories",
+    "archive",
+    "cleanup"
   ],
   "repository": {
     "type": "git",
