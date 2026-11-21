@@ -1,8 +1,8 @@
-name: Security & Integrity Checks
+name: Tests & Security Checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
   pull_request:
     branches: [main]
 
@@ -10,36 +10,63 @@ permissions:
   contents: read
 
 jobs:
-  security-audit:
+  test:
+    name: Tests (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
 
       - name: Verify JavaScript syntax
         run: |
-          node --check server.mjs
-          node --check public/app.js
+          for f in server.mjs lib/*.mjs public/app.js public/lib/*.js public/js/*.js; do
+            node --check "$f"
+          done
+
+      - name: Run unit and integration tests
+        run: npm test
+
+  security-audit:
+    name: Security & integrity checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
 
       - name: Verify zero runtime dependencies
         run: |
           node -e '
             const pkg = require("./package.json");
-            if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
-              console.error("Unexpected runtime dependencies found:", pkg.dependencies);
-              process.exit(1);
+            for (const field of ["dependencies", "devDependencies"]) {
+              if (pkg[field] && Object.keys(pkg[field]).length > 0) {
+                console.error(`Unexpected ${field}:`, pkg[field]);
+                process.exit(1);
+              }
             }
-            console.log("OK: Zero runtime dependencies.");
+            console.log("OK: Zero dependencies.");
           '
 
       - name: Verify no hardcoded GitHub tokens or eval()
         run: |
-          if grep -rnE "gho_[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|eval\(" server.mjs public/; then
+          if grep -rnE "gho_[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|eval\(|new Function\(" server.mjs lib/ public/; then
             echo "ERROR: Potential secret or eval() detected!"
             exit 1
           fi
@@ -50,4 +77,20 @@ jobs:
           grep -q "Content-Security-Policy:" public/_headers
           grep -q "X-Frame-Options: DENY" public/_headers
           grep -q "X-Content-Type-Options: nosniff" public/_headers
+          grep -q "script-src 'self'" public/_headers
           echo "OK: Security headers verified."
+
+      - name: Verify npm package contents
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const files = require("./pack.json")[0].files.map((f) => f.path);
+            const required = ["server.mjs", "lib/server.mjs", "public/app.js", "public/lib/github.js"];
+            const missing = required.filter((f) => !files.includes(f));
+            const leaked = files.filter((f) => f.startsWith("test/") || f.startsWith("data/") || f.startsWith(".github/"));
+            if (missing.length || leaked.length) {
+              console.error("Missing:", missing, "Unexpected:", leaked);
+              process.exit(1);
+            }
+            console.log(`OK: ${files.length} files in package.`);
+          '
